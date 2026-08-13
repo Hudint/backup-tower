@@ -13,6 +13,7 @@ import (
 	"github.com/Hudint/backup-tower/internal/config"
 	"github.com/Hudint/backup-tower/internal/discover"
 	"github.com/Hudint/backup-tower/internal/runtime"
+	"github.com/Hudint/backup-tower/internal/update"
 )
 
 func newPlanCmd() *cobra.Command {
@@ -21,6 +22,7 @@ func newPlanCmd() *cobra.Command {
 		includeStopped bool
 		explain        string
 		noNotes        bool
+		check          bool
 	)
 
 	cmd := &cobra.Command{
@@ -66,7 +68,16 @@ func newPlanCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			printPlanTable(out, candidates, showAll)
+
+			var checks map[string]*update.Check
+			if check {
+				checks, err = runChecks(ctx, e, candidates, showAll)
+				if err != nil {
+					return err
+				}
+			}
+
+			printPlanTable(out, candidates, checks, showAll)
 			return nil
 		},
 	}
@@ -75,6 +86,7 @@ func newPlanCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&includeStopped, "include-stopped", false, "consider stopped containers too")
 	cmd.Flags().StringVar(&explain, "explain", "", "explain the decision for one container in detail")
 	cmd.Flags().BoolVar(&noNotes, "no-notes", false, "omit the advisory notes column")
+	cmd.Flags().BoolVar(&check, "check", false, "ask each registry whether a newer image is available")
 	return cmd
 }
 
@@ -129,7 +141,27 @@ func buildSelector(ctx context.Context, cfg config.Config, rt *runtime.Client, n
 	}), notes, nil
 }
 
-func printPlanTable(out io.Writer, candidates []*discover.Candidate, showAll bool) {
+// runChecks asks the registries about the selected containers. Failures are
+// carried in the result rather than aborting: one unreachable registry must not
+// hide the state of every other container.
+func runChecks(ctx context.Context, e *env, candidates []*discover.Candidate, all bool) (map[string]*update.Check, error) {
+	auth, err := runtime.LoadRegistryAuth("")
+	if err != nil {
+		return nil, err
+	}
+	checker := update.NewChecker(e.rt, auth)
+
+	out := make(map[string]*update.Check, len(candidates))
+	for _, c := range candidates {
+		if !all && !c.Decision.Policy.Enabled {
+			continue
+		}
+		out[c.Container.Name] = checker.Check(ctx, c)
+	}
+	return out, nil
+}
+
+func printPlanTable(out io.Writer, candidates []*discover.Candidate, checks map[string]*update.Check, showAll bool) {
 	shown := candidates
 	if !showAll {
 		shown = nil
@@ -149,8 +181,18 @@ func printPlanTable(out io.Writer, candidates []*discover.Candidate, showAll boo
 	}
 
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "CONTAINER\tACTION\tSTRATEGY\tSNAPSHOT\tSCHEDULE\tENABLED BY\tNOTE")
+	header := "CONTAINER\tACTION\tSTRATEGY\tSNAPSHOT\tSCHEDULE\tENABLED BY\tNOTE"
+	if checks != nil {
+		header = "CONTAINER\tACTION\tREGISTRY\tSTRATEGY\tSNAPSHOT\tENABLED BY\tNOTE"
+	}
+	fmt.Fprintln(tw, header)
 	for _, c := range shown {
+		if checks != nil {
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+				c.Container.Name, action(c), checkCell(checks[c.Container.Name]),
+				strategyCell(c), snapshotCell(c), enabledBy(c), firstNote(c))
+			continue
+		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			c.Container.Name,
 			action(c),
@@ -197,6 +239,13 @@ func action(c *discover.Candidate) string {
 	default:
 		return "-"
 	}
+}
+
+func checkCell(c *update.Check) string {
+	if c == nil {
+		return "-"
+	}
+	return c.Describe()
 }
 
 func strategyCell(c *discover.Candidate) string {

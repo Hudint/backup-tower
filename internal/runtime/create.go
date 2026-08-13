@@ -3,9 +3,12 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"maps"
 	"sort"
 	"strings"
 
+	dockerspec "github.com/moby/docker-image-spec/specs-go/v1"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/network"
 	"github.com/moby/moby/client"
@@ -19,6 +22,14 @@ type RecreateOptions struct {
 	// Image reference to run. This is the point of the whole exercise during a
 	// rollback: same configuration, different image.
 	Image string
+	// Log receives the details of what was rebuilt. Expected behaviour is logged
+	// at debug level so a normal update stays quiet.
+	Log *slog.Logger
+	// InheritedFrom is the configuration of the image the captured container ran
+	// on. Set it when recreating on a *different* image, so values that merely
+	// came from the old image are dropped and the new one supplies its own. See
+	// StripImageDefaults for why that is not optional.
+	InheritedFrom *dockerspec.DockerOCIImageConfig
 }
 
 // Recreate builds a container from a previously captured inspect response.
@@ -36,6 +47,28 @@ func (c *Client) Recreate(ctx context.Context, in *container.InspectResponse, op
 	cfg := *in.Config
 	cfg.Image = opts.Image
 
+	// Copy the maps before editing: the caller's inspect response must not be
+	// mutated underneath it.
+	cfg.Labels = maps.Clone(cfg.Labels)
+	cfg.ExposedPorts = maps.Clone(cfg.ExposedPorts)
+	cfg.Volumes = maps.Clone(cfg.Volumes)
+
+	log := opts.Log
+	if log == nil {
+		log = slog.Default()
+	}
+
+	// Dropping the old image's defaults happens on every update, so it belongs
+	// in the debug log rather than in the warnings a person is meant to read.
+	if opts.InheritedFrom != nil {
+		if dropped := StripImageDefaults(&cfg, opts.InheritedFrom); len(dropped) > 0 {
+			log.Debug("let the new image supply its own settings",
+				"container", opts.Name, "dropped", strings.Join(dropped, ", "))
+		}
+	}
+
+	var warnings []string
+
 	// The engine defaults Hostname to the container's own short ID. Carrying
 	// that over would pin the new container to the identity of the old one.
 	if isShortIDOf(cfg.Hostname, in.ID) {
@@ -47,7 +80,8 @@ func (c *Client) Recreate(ctx context.Context, in *container.InspectResponse, op
 		hostCfg = *in.HostConfig
 	}
 
-	netCfg, warnings := networkingConfig(in)
+	netCfg, netWarnings := networkingConfig(in)
+	warnings = append(warnings, netWarnings...)
 
 	created, err := c.api.ContainerCreate(ctx, client.ContainerCreateOptions{
 		Name:             opts.Name,

@@ -44,6 +44,10 @@ type Options struct {
 	// NoPin disables tagging the image so it survives pruning. Only useful when
 	// the snapshot is explicitly not meant to be a rollback point.
 	NoPin bool
+	// LeaveStopped keeps a container that was stopped for the snapshot down
+	// afterwards. An update is about to replace it anyway, and starting it back
+	// up only to stop it again would double the downtime for nothing.
+	LeaveStopped bool
 }
 
 // Taker produces snapshots.
@@ -124,7 +128,15 @@ func (t *Taker) Take(ctx context.Context, ref string, opts Options) (*Manifest, 
 		m.Quiesce = QuiesceStopped
 	}
 
-	restart, err := t.quiesce(ctx, c, stopWanted)
+	restart, err := t.quiesce(ctx, c, stopWanted && !opts.LeaveStopped)
+	if stopWanted && opts.LeaveStopped {
+		// Stop without arranging a restart: the caller is about to replace this
+		// container and will bring the replacement up itself.
+		t.log.Info("stopping container for a consistent snapshot", "container", c.Name)
+		if err := t.rt.Stop(ctx, c.ID, opts.StopTimeout); err != nil {
+			return nil, err
+		}
+	}
 	if err != nil {
 		return nil, err
 	}

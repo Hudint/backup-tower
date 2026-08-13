@@ -17,15 +17,15 @@ check image → stop container → snapshot (cold, consistent)
 
 ## Status
 
-Milestones 1 to 3 of 5 are complete. Snapshots work, the way back works, and
-backup-tower can say exactly which containers it would act on.
+Milestones 1 to 4 of 5 are complete. The core loop works end to end: check,
+snapshot, update, verify, and roll back when it goes wrong.
 
 | | |
 |---|---|
 | ✅ M1 | Snapshot container configuration, named volumes and bind mounts |
 | ✅ M2 | Restore and rollback |
 | ✅ M3 | Selection engine and dry run |
-| ⬜ M4 | Update engine with health gate |
+| ✅ M4 | Update engine with health gate |
 | ⬜ M5 | Scheduling, retention, packaging |
 
 ## Storage format
@@ -60,6 +60,11 @@ backup-tower verify webapp                 # re-check archives against their che
 
 backup-tower restore webapp                # put the data back
 backup-tower rollback webapp               # data, configuration and image together
+
+backup-tower update --dry-run              # what would be updated, per registry
+backup-tower update                        # update everything that opted in
+backup-tower update webapp                 # update exactly this one
+backup-tower daemon                        # keep checking on an interval
 ```
 
 `verify` matters more than it looks: a backup that is never read is only a
@@ -96,6 +101,73 @@ at an ID that no longer exists, IP addresses already handed to someone else.
 replacement exists; if anything fails in between, the original is put back under
 its own name. A rollback that leaves you with no container at all would be a
 worse failure than the one it was fixing.
+
+## Updating
+
+```
+check the registry → pull → hooks → stop → snapshot → replace → health gate
+                                                            ↓ failed
+                                                        roll back
+```
+
+**The check is on manifest digests, not tags.** A moving tag like `:latest` says
+nothing about whether the content changed, and pulling every image just to find
+out is expensive enough on a busy host that people turn updates off. The engine's
+own distribution endpoint answers the question without downloading anything.
+
+**The pull happens before the container is stopped**, so the download never counts
+as downtime. The container then goes down once — for the snapshot and the
+replacement together — which is what makes the consistent snapshot free.
+
+**Two strategies, chosen automatically.** A container that came from a compose
+file is updated with `docker compose up -d --no-deps`, which is what its owner
+would do by hand and what Komodo does when it redeploys. Everything else is
+recreated through the API. If the compose plugin or the compose file is not
+reachable, it falls back to the API path and says so rather than failing.
+
+**A subtlety that decides whether updates are correct at all.** The engine's
+inspect response does not distinguish what the operator asked for from what the
+image supplied — `CMD`, `ENTRYPOINT`, `HEALTHCHECK`, `ENV` and `LABEL` all look
+like they were requested. Recreating a container with that whole set pins the new
+release to the *old* image's defaults. A release that changes its entrypoint runs
+with the previous one, and — worst of all — a broken release passes the health
+gate, because the healthcheck being evaluated is the old version's. backup-tower
+therefore subtracts the old image's own defaults and keeps only what differs from
+them.
+
+### Health gate
+
+If the image declares a `HEALTHCHECK`, that decides: the gate waits for healthy
+and fails on unhealthy. Whether a healthcheck exists is read from the
+configuration, not from whether the engine has populated the health state yet —
+right after a start it has not, and treating that moment as "no healthcheck"
+would let the weaker check decide a case the healthcheck was there to judge.
+
+Without a healthcheck, the honest fallback is to watch for a crash loop over a
+settle window, and the result says exactly that: *health verified only by staying
+up*.
+
+### Rollback
+
+Automatic rollback is opt-in per container (`tower.rollback=true`). Undoing an
+update means restoring data and discarding whatever the new version wrote —
+right often enough to offer, not often enough to impose. When it is off, the
+failure message names the exact command to run.
+
+A rollback leaves the container on a **digest reference**, not a tag. The tag now
+points at the release that just failed, so resolving it would immediately undo
+the rollback; the next check reports `pinned to a digest` instead of quietly
+looping.
+
+### Hooks
+
+`tower.hook.pre-update`, `.pre-snapshot` and `.post-update` run as `sh -c` inside
+the container. Both pre-hooks run while the application is still up — pre-update
+first as the coarse "a change is coming" signal, then pre-snapshot, so a dump is
+taken with the application already quiesced.
+
+**A failing pre-hook aborts the update before the container is touched.** If the
+dump did not happen, the snapshot would look complete and not be.
 
 ## Selecting containers
 

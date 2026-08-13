@@ -55,6 +55,8 @@ func newRootCmd() *cobra.Command {
 		newInfoCmd(),
 		newPlanCmd(),
 		newSnapshotCmd(),
+		newUpdateCmd(),
+		newDaemonCmd(),
 		newListCmd(),
 		newShowCmd(),
 		newVerifyCmd(),

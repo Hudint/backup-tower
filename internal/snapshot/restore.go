@@ -149,18 +149,24 @@ func (r *Restorer) resolveImage(ctx context.Context, m *Manifest, current *runti
 		return "", fmt.Errorf("container no longer exists, so its current image is unknown; restore the recorded image as well")
 	}
 
-	// Ordered by how faithfully each reference identifies what actually ran: the
-	// image ID is exact, the pin is exact but may have been released, a registry
-	// digest is exact but may need pulling, and the plain tag may since have
-	// moved to a different image entirely.
-	candidates := []string{m.Container.ImageID, m.Container.PinnedTag}
-	candidates = append(candidates, runtime.KeepTag(m.Container.Name, m.ID))
+	// A registry digest comes first because it is both exact and named: the
+	// container stays identifiable afterwards, and a later update check can say
+	// "pinned to a digest" rather than "this image has no name".
+	//
+	// The plain tag is deliberately absent. It is the reference we are rolling
+	// back *from* — resolving it now would hand back the very image that just
+	// failed, which is the opposite of a rollback.
+	var candidates []string
 	candidates = append(candidates, m.Container.ImageDigests...)
-	candidates = append(candidates, m.Container.Image)
+	candidates = append(candidates, m.Container.PinnedTag)
+	candidates = append(candidates, runtime.KeepTag(m.Container.Name, m.ID))
+	candidates = append(candidates, m.Container.ImageID)
 
 	ref, err := r.rt.ResolveImage(ctx, candidates...)
 	if err != nil {
-		return "", fmt.Errorf("cannot roll back to the recorded image: %w", err)
+		return "", fmt.Errorf("cannot roll back to the image recorded in this snapshot: %w."+
+			" The tag %q is not used as a fallback because it now points at the image being rolled back from",
+			err, m.Container.Image)
 	}
 	return ref, nil
 }
@@ -333,34 +339,14 @@ func (r *Restorer) recreate(ctx context.Context, container, id string, p *Plan) 
 		return nil, err
 	}
 
-	var parked string
-	if p.Container != nil {
-		parked = fmt.Sprintf("%s-backup-tower-%s", container, id)
-		r.log.Info("moving the current container aside", "container", container, "parked_as", parked)
-		if err := r.rt.Rename(ctx, p.Container.ID, parked); err != nil {
-			return nil, err
-		}
-	}
-
-	newID, warnings, err := r.rt.Recreate(ctx, in, runtime.RecreateOptions{
-		Name:  container,
-		Image: p.Image,
+	newID, warnings, err := r.rt.Replace(ctx, p.Container, in, runtime.ReplaceOptions{
+		Name:       container,
+		Image:      p.Image,
+		ParkSuffix: id,
+		Log:        r.log,
 	})
 	if err != nil {
-		// Put the original back before reporting the failure.
-		if parked != "" {
-			if undo := r.rt.Rename(context.WithoutCancel(ctx), p.Container.ID, container); undo != nil {
-				return warnings, fmt.Errorf("%w — and the original container could not be renamed back from %s: %v", err, parked, undo)
-			}
-			r.log.Info("restored the original container after a failed recreate", "container", container)
-		}
 		return warnings, err
-	}
-
-	if parked != "" {
-		if err := r.rt.Remove(context.WithoutCancel(ctx), p.Container.ID, true); err != nil {
-			warnings = append(warnings, fmt.Sprintf("the replaced container is still present as %s: %v", parked, err))
-		}
 	}
 	r.log.Info("recreated container", "container", container, "id", newID[:12], "image", p.Image)
 	return warnings, nil

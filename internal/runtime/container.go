@@ -126,6 +126,38 @@ func (c *Client) List(ctx context.Context, includeStopped bool) ([]*Container, e
 	return out, nil
 }
 
+// FindComposeService locates the container belonging to one compose service.
+//
+// After compose recreates a service the container has a new ID, and the name is
+// compose's to choose — so it is looked up by the labels that identify it,
+// which are the only stable handle.
+func (c *Client) FindComposeService(ctx context.Context, project, service string) (*Container, error) {
+	filters := client.Filters{}
+	filters.Add("label", "com.docker.compose.project="+project)
+	filters.Add("label", "com.docker.compose.service="+service)
+
+	res, err := c.api.ContainerList(ctx, client.ContainerListOptions{All: true, Filters: filters})
+	if err != nil {
+		return nil, fmt.Errorf("list containers of compose service %s/%s: %w", project, service, err)
+	}
+	switch len(res.Items) {
+	case 0:
+		return nil, fmt.Errorf("no container found for compose service %s/%s: %w", project, service, ErrNotFound)
+	case 1:
+		return c.Inspect(ctx, res.Items[0].ID)
+	}
+
+	// Scaled services have several containers. The newest is the one just
+	// created; anything else would be a guess.
+	newest := res.Items[0]
+	for _, item := range res.Items[1:] {
+		if item.Created > newest.Created {
+			newest = item
+		}
+	}
+	return c.Inspect(ctx, newest.ID)
+}
+
 // Stop stops a container and waits for it to actually be down. A nil timeout
 // leaves the decision to the engine and the container's own configuration.
 func (c *Client) Stop(ctx context.Context, id string, timeout *int) error {

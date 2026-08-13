@@ -2,10 +2,14 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"strings"
 
 	cerrdefs "github.com/containerd/errdefs"
+	"github.com/moby/moby/client"
 )
 
 // Image is the identity of a local image. The distinction between ID and
@@ -48,6 +52,35 @@ func (c *Client) InspectImage(ctx context.Context, ref string) (*Image, error) {
 		RepoTags:    res.RepoTags,
 		RepoDigests: res.RepoDigests,
 	}, nil
+}
+
+// PullImage fetches an image reference, waiting for the transfer to finish.
+//
+// The engine streams progress as JSON and only reports failures inside that
+// stream, so the body has to be read to the end — returning early would treat a
+// failed pull as a successful one.
+func (c *Client) PullImage(ctx context.Context, ref, encodedAuth string) error {
+	resp, err := c.api.ImagePull(ctx, ref, client.ImagePullOptions{RegistryAuth: encodedAuth})
+	if err != nil {
+		return fmt.Errorf("pull %s: %w", ref, err)
+	}
+	defer resp.Close()
+
+	dec := json.NewDecoder(resp)
+	for {
+		var msg struct {
+			Error string `json:"error"`
+		}
+		if err := dec.Decode(&msg); err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return fmt.Errorf("read progress while pulling %s: %w", ref, err)
+		}
+		if msg.Error != "" {
+			return fmt.Errorf("pull %s: %s", ref, msg.Error)
+		}
+	}
 }
 
 // ImageReference is the reference a container was created from, normalised so
