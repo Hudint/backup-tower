@@ -79,9 +79,13 @@ type ContainerRef struct {
 	ImageID string `json:"image_id"`
 	// ImageDigests are the registry digests of the image at snapshot time.
 	// Empty means the image was built locally and cannot be re-pulled.
-	ImageDigests   []string `json:"image_digests,omitempty"`
-	ComposeProject string   `json:"compose_project,omitempty"`
-	ComposeService string   `json:"compose_service,omitempty"`
+	ImageDigests []string `json:"image_digests,omitempty"`
+	// PinnedTag is the tag applied to keep the image alive for as long as this
+	// snapshot exists. Empty when pinning was disabled or failed, which means
+	// the image may be pruned away and the rollback with it.
+	PinnedTag      string `json:"pinned_tag,omitempty"`
+	ComposeProject string `json:"compose_project,omitempty"`
+	ComposeService string `json:"compose_service,omitempty"`
 }
 
 // EngineRef records which engine produced the snapshot.

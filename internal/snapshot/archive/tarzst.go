@@ -265,6 +265,26 @@ type ExtractOptions struct {
 	Chown bool
 }
 
+// CleanDir removes everything inside dir without removing dir itself.
+//
+// A restore has to replace, not merge. Files written after the snapshot would
+// otherwise survive it and leave the application looking at a state that never
+// existed. The directory itself must stay because it is the volume's mount
+// point — removing it would detach the volume from the container.
+func CleanDir(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("read %q: %w", dir, err)
+	}
+	for _, e := range entries {
+		path := filepath.Join(dir, e.Name())
+		if err := os.RemoveAll(path); err != nil {
+			return fmt.Errorf("remove %q: %w", path, err)
+		}
+	}
+	return nil
+}
+
 // Extract unpacks a tar+zstd stream into dst, which must already exist.
 func Extract(ctx context.Context, r io.Reader, dst string, opts ExtractOptions) error {
 	dec, err := zstd.NewReader(r)

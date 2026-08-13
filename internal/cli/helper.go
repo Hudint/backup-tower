@@ -22,7 +22,34 @@ func newHelperCmd() *cobra.Command {
 		Short:  "Internal commands executed inside helper containers",
 		Hidden: true,
 	}
-	cmd.AddCommand(newHelperArchiveCmd())
+	cmd.AddCommand(newHelperArchiveCmd(), newHelperExtractCmd())
+	return cmd
+}
+
+func newHelperExtractCmd() *cobra.Command {
+	var (
+		dest  string
+		clean bool
+		chown bool
+	)
+
+	cmd := &cobra.Command{
+		Use:   "extract",
+		Short: "Extract a tar+zstd archive from stdin into a directory",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if clean {
+				if err := archive.CleanDir(dest); err != nil {
+					return err
+				}
+			}
+			return archive.Extract(cmd.Context(), os.Stdin, dest, archive.ExtractOptions{Chown: chown})
+		},
+	}
+
+	cmd.Flags().StringVar(&dest, "dest", source.HelperRestoreMount, "directory to extract into")
+	cmd.Flags().BoolVar(&clean, "clean", false, "empty the destination first")
+	cmd.Flags().BoolVar(&chown, "chown", false, "restore recorded ownership")
 	return cmd
 }
 

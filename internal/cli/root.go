@@ -57,6 +57,8 @@ func newRootCmd() *cobra.Command {
 		newListCmd(),
 		newShowCmd(),
 		newVerifyCmd(),
+		newRestoreCmd(),
+		newRollbackCmd(),
 		newHelperCmd(),
 	)
 	return cmd

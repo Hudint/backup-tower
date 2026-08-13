@@ -35,6 +35,11 @@ const (
 // HelperMount is where the helper container sees the data it archives.
 const HelperMount = "/src"
 
+// HelperRestoreMount is where the helper container writes during a restore. It
+// is deliberately a different path from HelperMount so a mistake in the command
+// line cannot turn a read-only archive run into a write.
+const HelperRestoreMount = "/dst"
+
 // statsPrefix marks the helper's machine-readable report on stderr. stdout
 // carries the archive itself and must stay pure.
 const statsPrefix = "backup-tower-stats: "
@@ -101,7 +106,7 @@ func (a *Accessor) archiveViaHelper(ctx context.Context, m runtime.Mount, w io.W
 		return archive.Stats{}, fmt.Errorf("cannot reach %s directly and no helper image is configured", describe(m))
 	}
 
-	bind, err := helperBind(m)
+	bind, err := helperBind(m, HelperMount, false)
 	if err != nil {
 		return archive.Stats{}, err
 	}
@@ -118,7 +123,7 @@ func (a *Accessor) archiveViaHelper(ctx context.Context, m runtime.Mount, w io.W
 	// arrived, not the ones the helper believes it sent.
 	meter := archive.NewMeter(w)
 
-	stderr, err := a.rt.RunAndStream(ctx, runtime.HelperSpec{
+	stderr, err := a.rt.RunHelper(ctx, runtime.HelperSpec{
 		Image:   a.opts.HelperImage,
 		Cmd:     cmd,
 		Binds:   []string{bind},
@@ -137,21 +142,25 @@ func (a *Accessor) archiveViaHelper(ctx context.Context, m runtime.Mount, w io.W
 	return stats, nil
 }
 
-// helperBind builds the mount spec that gives the helper read-only sight of the
-// data. Read-only is not a formality: the helper must be incapable of altering
-// the very data it is supposed to preserve.
-func helperBind(m runtime.Mount) (string, error) {
+// helperBind builds the mount spec that gives the helper sight of the data.
+// While archiving it is read-only, and that is not a formality: the helper must
+// be incapable of altering the very data it is supposed to preserve.
+func helperBind(m runtime.Mount, mountPoint string, writable bool) (string, error) {
+	mode := ":ro"
+	if writable {
+		mode = ":rw"
+	}
 	switch m.Type {
 	case runtime.MountVolume:
 		if m.Name == "" {
 			return "", fmt.Errorf("volume mount at %s has no name", m.Destination)
 		}
-		return m.Name + ":" + HelperMount + ":ro", nil
+		return m.Name + ":" + mountPoint + mode, nil
 	case runtime.MountBind:
 		if m.Source == "" {
 			return "", fmt.Errorf("bind mount at %s has no host path", m.Destination)
 		}
-		return m.Source + ":" + HelperMount + ":ro", nil
+		return m.Source + ":" + mountPoint + mode, nil
 	default:
 		return "", fmt.Errorf("mount type %q at %s cannot be archived", m.Type, m.Destination)
 	}

@@ -17,12 +17,12 @@ check image → stop container → snapshot (cold, consistent)
 
 ## Status
 
-Milestone 1 of 5 is complete: snapshots work.
+Milestones 1 and 2 of 5 are complete: snapshots work, and so does the way back.
 
 | | |
 |---|---|
 | ✅ M1 | Snapshot container configuration, named volumes and bind mounts |
-| ⬜ M2 | Restore and rollback |
+| ✅ M2 | Restore and rollback |
 | ⬜ M3 | Selection engine and dry run |
 | ⬜ M4 | Update engine with health gate |
 | ⬜ M5 | Scheduling, retention, packaging |
@@ -54,10 +54,45 @@ backup-tower snapshot webapp --binds       # include bind-mounted host paths
 backup-tower list                          # what has been stored
 backup-tower show webapp                   # details of the latest snapshot
 backup-tower verify webapp                 # re-check archives against their checksums
+
+backup-tower restore webapp                # put the data back
+backup-tower rollback webapp               # data, configuration and image together
 ```
 
 `verify` matters more than it looks: a backup that is never read is only a
 hypothesis.
+
+Restores replace, they do not merge — anything written since the snapshot is
+gone afterwards. Both commands print exactly what they are about to destroy and
+ask before doing it; `--yes` skips the question, and without a terminal they
+refuse rather than assume.
+
+Archives are checksummed before anything is written. A snapshot that does not
+match its manifest is refused, because a half-restored volume is worse than an
+untouched broken one.
+
+## Rollback
+
+`rollback` is the full way back after a bad update: it restores the archived
+data, recreates the container from its captured configuration, and puts it on
+the image it was running when the snapshot was taken.
+
+Three details make it hold up in practice:
+
+**The old image is pinned.** After an update the previous image loses its tag,
+which makes it fair game for `docker image prune`. Every snapshot tags it under
+`backup-tower/keep` so it survives for as long as the snapshot does. Without
+this the rollback path works right up until someone tidies up.
+
+**Runtime state is separated from configuration.** The engine's inspect response
+mixes the two, and handing the state back is how recreated containers end up
+subtly wrong — a hostname frozen to a dead container's ID, DNS aliases pointing
+at an ID that no longer exists, IP addresses already handed to someone else.
+
+**The old container is moved aside, not deleted.** It is only removed once its
+replacement exists; if anything fails in between, the original is put back under
+its own name. A rollback that leaves you with no container at all would be a
+worse failure than the one it was fixing.
 
 ## Configuration
 

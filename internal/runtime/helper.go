@@ -32,17 +32,28 @@ type HelperSpec struct {
 	Labels map[string]string
 	// Purpose is a short description used in error messages.
 	Purpose string
+	// Stdin, when set, is streamed into the helper. Used for restores, where
+	// the archive flows the other way.
+	Stdin io.Reader
+	// ReadOnlyRootfs can be disabled for helpers that need to write outside
+	// their mounts; archiving and extraction do not.
+	WritableRootfs bool
 }
 
-// RunAndStream creates the helper, streams its stdout into out, and waits for
-// it to exit. The captured stderr is returned so the caller can read the
-// helper's own report from it; on failure it is folded into the error, so a
-// problem explains itself instead of surfacing as a bare exit code.
-func (c *Client) RunAndStream(ctx context.Context, spec HelperSpec, out io.Writer) ([]byte, error) {
+// RunHelper creates the helper, feeds it stdin if there is any, streams its
+// stdout into out, and waits for it to exit. The captured stderr is returned so
+// the caller can read the helper's own report from it; on failure it is folded
+// into the error, so a problem explains itself instead of surfacing as a bare
+// exit code.
+func (c *Client) RunHelper(ctx context.Context, spec HelperSpec, out io.Writer) ([]byte, error) {
 	labels := map[string]string{HelperLabel: "true"}
 	for k, v := range spec.Labels {
 		labels[k] = v
 	}
+	if out == nil {
+		out = io.Discard
+	}
+	withStdin := spec.Stdin != nil
 
 	created, err := c.api.ContainerCreate(ctx, client.ContainerCreateOptions{
 		Config: &container.Config{
@@ -51,17 +62,19 @@ func (c *Client) RunAndStream(ctx context.Context, spec HelperSpec, out io.Write
 			Labels:       labels,
 			AttachStdout: true,
 			AttachStderr: true,
+			AttachStdin:  withStdin,
+			OpenStdin:    withStdin,
+			StdinOnce:    withStdin,
 			// A TTY would give us a single unmultiplexed stream, but it also
 			// puts the output through line-ending translation, which corrupts
 			// binary archives. Multiplexed it is.
 			Tty: false,
 		},
 		HostConfig: &container.HostConfig{
-			Binds:       spec.Binds,
-			AutoRemove:  false, // we remove it ourselves, after reading the exit code
-			NetworkMode: "none",
-			// The helper only ever reads mounted data and writes to stdout.
-			ReadonlyRootfs: true,
+			Binds:          spec.Binds,
+			AutoRemove:     false, // we remove it ourselves, after reading the exit code
+			NetworkMode:    "none",
+			ReadonlyRootfs: !spec.WritableRootfs,
 		},
 	})
 	if err != nil {
@@ -79,6 +92,7 @@ func (c *Client) RunAndStream(ctx context.Context, spec HelperSpec, out io.Write
 
 	attached, err := c.api.ContainerAttach(ctx, created.ID, client.ContainerAttachOptions{
 		Stream: true,
+		Stdin:  withStdin,
 		Stdout: true,
 		Stderr: true,
 	})
@@ -92,13 +106,28 @@ func (c *Client) RunAndStream(ctx context.Context, spec HelperSpec, out io.Write
 	}
 
 	var stderr bytes.Buffer
-	copyErr := make(chan error, 1)
+	readDone := make(chan error, 1)
 	go func() {
 		// Bound the captured stderr: a helper stuck in a log loop must not be
 		// able to exhaust our memory.
 		_, err := stdcopy.StdCopy(out, &limitedWriter{w: &stderr, remaining: 64 << 10}, attached.Reader)
-		copyErr <- err
+		readDone <- err
 	}()
+
+	writeDone := make(chan error, 1)
+	if withStdin {
+		go func() {
+			_, err := io.Copy(attached.Conn, spec.Stdin)
+			// Signal end of input; without this the helper waits forever for
+			// more data and the run never finishes.
+			if closeErr := attached.CloseWrite(); err == nil {
+				err = closeErr
+			}
+			writeDone <- err
+		}()
+	} else {
+		writeDone <- nil
+	}
 
 	var runErr error
 	select {
@@ -122,10 +151,12 @@ func (c *Client) RunAndStream(ctx context.Context, spec HelperSpec, out io.Write
 
 	// The copy goroutine owns the stderr buffer until it returns, so nothing may
 	// read it before then. Draining also matters for the happy path: without it
-	// the tail of the archive can be lost.
-	copyResult := <-copyErr
-	if runErr == nil && copyResult != nil && copyResult != io.EOF {
-		runErr = fmt.Errorf("read output of helper container for %s: %w", spec.Purpose, copyResult)
+	// the tail of the stream can be lost.
+	if err := <-readDone; runErr == nil && err != nil && err != io.EOF {
+		runErr = fmt.Errorf("read output of helper container for %s: %w", spec.Purpose, err)
+	}
+	if err := <-writeDone; runErr == nil && err != nil {
+		runErr = fmt.Errorf("send input to helper container for %s: %w", spec.Purpose, err)
 	}
 	if runErr != nil && stderr.Len() > 0 {
 		runErr = fmt.Errorf("%w: %s", runErr, strings.TrimSpace(stderr.String()))

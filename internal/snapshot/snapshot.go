@@ -41,6 +41,9 @@ type Options struct {
 	// StopTimeout is passed to the engine when stopping; nil uses the
 	// container's own configuration.
 	StopTimeout *int
+	// NoPin disables tagging the image so it survives pruning. Only useful when
+	// the snapshot is explicitly not meant to be a rollback point.
+	NoPin bool
 }
 
 // Taker produces snapshots.
@@ -171,6 +174,19 @@ func (t *Taker) Take(ctx context.Context, ref string, opts Options) (*Manifest, 
 		t.log.Info("archived mount",
 			"container", c.Name, "mount", entry.Name, "kind", entry.Kind,
 			"method", entry.Method, "bytes", entry.ArchiveBytes)
+	}
+
+	// Pin the image before the snapshot is published. `docker image prune`
+	// removes untagged images, and the image a container runs becomes untagged
+	// the moment an update replaces it — so without this the rollback path works
+	// right up until someone tidies up.
+	if !opts.NoPin && c.ImageID != "" {
+		tag := runtime.KeepTag(c.Name, m.ID)
+		if err := t.rt.PinImage(ctx, c.ImageID, tag); err != nil {
+			m.Warnings = append(m.Warnings, fmt.Sprintf("could not pin the image against pruning: %v", err))
+		} else {
+			m.Container.PinnedTag = tag
+		}
 	}
 
 	m.CompletedAt = time.Now().UTC()
