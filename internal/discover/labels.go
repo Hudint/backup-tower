@@ -4,6 +4,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/Hudint/backup-tower/internal/schedule"
 )
 
 // LabelPrefix is the only namespace backup-tower reads.
@@ -111,7 +113,17 @@ func applyLabels(p *Policy, labels map[string]string, d *Decision) {
 				p.Strategy = s
 			}
 		case LabelSchedule:
-			p.Schedule = strings.TrimSpace(v)
+			expr := strings.TrimSpace(v)
+			if expr != "" {
+				// Validate here rather than at fire time: a schedule that never
+				// runs because of a typo is indistinguishable from one that was
+				// never set.
+				if _, err := schedule.Parse(expr); err != nil {
+					d.problem("label %s: %v — no scheduled backup will run", k, err)
+					break
+				}
+			}
+			p.Schedule = expr
 		case LabelRetentionKeep:
 			if n, ok := parseInt(v, k, d); ok {
 				p.RetentionKeep = n

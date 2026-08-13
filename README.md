@@ -17,8 +17,8 @@ check image → stop container → snapshot (cold, consistent)
 
 ## Status
 
-Milestones 1 to 4 of 5 are complete. The core loop works end to end: check,
-snapshot, update, verify, and roll back when it goes wrong.
+All five milestones are complete. The tool does what it set out to do: update
+containers automatically without ever losing the way back.
 
 | | |
 |---|---|
@@ -26,7 +26,11 @@ snapshot, update, verify, and roll back when it goes wrong.
 | ✅ M2 | Restore and rollback |
 | ✅ M3 | Selection engine and dry run |
 | ✅ M4 | Update engine with health gate |
-| ⬜ M5 | Scheduling, retention, packaging |
+| ✅ M5 | Scheduling, retention, packaging |
+
+Deliberately not in this version: restic and remote backup targets,
+notifications (the events are already routed through one place for a notifier to
+attach to), writable-layer snapshots, and the Podman quadlet path.
 
 ## Storage format
 
@@ -65,6 +69,9 @@ backup-tower update --dry-run              # what would be updated, per registry
 backup-tower update                        # update everything that opted in
 backup-tower update webapp                 # update exactly this one
 backup-tower daemon                        # keep checking on an interval
+
+backup-tower prune --dry-run               # what retention would delete
+backup-tower prune                         # apply it
 ```
 
 `verify` matters more than it looks: a backup that is never read is only a
@@ -168,6 +175,61 @@ taken with the application already quiesced.
 
 **A failing pre-hook aborts the update before the container is touched.** If the
 dump did not happen, the snapshot would look complete and not be.
+
+## Scheduled backups
+
+A container can be worth backing up nightly without ever being updated
+automatically, so the two are separate decisions. `tower.schedule` takes an
+ordinary cron expression; nothing else needs to be enabled.
+
+```yaml
+labels:
+  tower.schedule: "0 4 * * *"
+```
+
+Scheduled backups read **hot** by default. Creating downtime on a timer is not a
+decision to make on the operator's behalf — `tower.snapshot.stop=always` asks for
+a consistent one and accepts the pause. A hot snapshot is crash-consistent, and
+the manifest records which it was so a restore can say so too.
+
+**The last run is read back from the backup store, not from a state file.** The
+snapshots already record when each one was taken and why, so a restarted daemon
+neither repeats a backup it just took nor silently skips one it owes — and there
+is no second source of truth to drift out of step with the first. A container
+with no history is not retroactively owed anything either: the first fire time is
+counted from when the daemon started.
+
+An invalid cron expression is reported by `plan` as a configuration problem. A
+schedule that never runs because of a typo is otherwise indistinguishable from
+one that was never set.
+
+## Retention
+
+A snapshot survives if it is among the most recent **N** *or* younger than **D**
+days. Both apply, which is what makes the pair useful: the count protects a
+rarely-updated container from ageing out entirely, the age protects a
+frequently-updated one from losing last week.
+
+**Snapshots taken by hand are never swept up automatically.** Someone who ran a
+snapshot before making a change did so precisely because they wanted it there
+afterwards; the policy that prunes routine automatic snapshots has no business
+overruling that. `--include-manual` overrides it.
+
+**Removing a snapshot releases the image it was holding.** This is the half that
+is easy to forget and expensive to skip: every update pins the image it replaced,
+so without it the image store grows by one image per update, forever — and
+`docker image prune` cannot help, because every one of them is tagged.
+
+Retention runs automatically after each scheduled backup and after each update
+pass. `backup-tower prune` applies it on demand, and always shows what it would
+remove before removing anything.
+
+A snapshot whose manifest cannot be read is never deleted. It may be the only
+record of something, and guessing is not worth the disk space.
+
+`prune` also releases pins whose snapshot went away by other means — a
+hand-deleted directory, a moved backup root. Those would otherwise stay forever
+and defeat the pruning the mechanism exists to survive.
 
 ## Selecting containers
 
@@ -294,22 +356,21 @@ sufficient rights — that faster path is used automatically.
 
 ## Running as a container
 
-Compose directories must be mounted at an **identical path**. Compose creates
-containers on the host daemon while resolving relative paths against our
-filesystem; a different mount point silently breaks bind mounts.
+See [`compose.example.yaml`](compose.example.yaml) for a complete file. Two
+things about it are not cosmetic:
 
-```yaml
-services:
-  backup-tower:
-    image: backup-tower:dev
-    command: ["daemon"]
-    environment:
-      TOWER_HELPER_IMAGE: backup-tower:dev
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - /etc/komodo/repos:/etc/komodo/repos:ro   # identical path, see above
-      - /srv/backups:/backups
-```
+**Compose directories must be mounted at an identical path.** Compose creates
+containers on the host daemon but resolves relative paths against *our*
+filesystem, so a compose file mounted anywhere else silently produces containers
+with the wrong bind mounts.
+
+**`TOWER_HELPER_IMAGE` must name this same image.** backup-tower starts itself to
+reach volumes it cannot mount into an already-running container; without it, only
+directly readable volumes work.
+
+Backups written from inside the container are owned by root with mode `0750`, so
+reading them from the host needs root — or another container, which is how you
+would restore them anyway.
 
 ## Development
 

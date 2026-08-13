@@ -1,0 +1,78 @@
+# Running backup-tower as a container.
+#
+# Copy this, adjust the paths, and start it. Nothing on the host is touched until
+# a container carries `tower.enable=true` — run `backup-tower plan` first to see
+# exactly what would happen.
+
+services:
+  backup-tower:
+    image: backup-tower:dev
+    container_name: backup-tower
+    command: ["daemon"]
+    restart: unless-stopped
+
+    environment:
+      # Where snapshots go, as seen from inside this container.
+      TOWER_BACKUP_DIR: /backups
+
+      # The image used for helper containers. It must be this same image:
+      # backup-tower starts itself to reach volumes it cannot mount into a
+      # running container. Without this, only directly readable volumes work.
+      TOWER_HELPER_IMAGE: backup-tower:dev
+
+      # How often to check for updates.
+      TOWER_INTERVAL: 6h
+
+      # Retention. Both apply: a snapshot survives if it is among the last N
+      # *or* younger than D days.
+      TOWER_RETENTION_KEEP: "3"
+      TOWER_RETENTION_DAYS: "14"
+
+      # Compression level. During an update the container is stopped while this
+      # runs, so this is downtime — 3 is a deliberate compromise.
+      TOWER_ZSTD_LEVEL: "3"
+
+      # Disk throughput is the bottleneck, not CPU.
+      TOWER_CONCURRENCY: "2"
+
+      # Optional: selection rules for what labels cannot reach.
+      # TOWER_RULES_FILE: /etc/backup-tower/rules.yaml
+
+      # Optional: Komodo as an additional selection source, and as a source of
+      # registry credentials for images its stacks pull.
+      # KOMODO_URL: https://komodo.example.com
+      # KOMODO_API_KEY: ...
+      # KOMODO_API_SECRET: ...
+      # KOMODO_TAG: auto-update
+      # KOMODO_SERVER: prod-01   # required when the tag spans several hosts
+
+    volumes:
+      # The engine. Everything else follows from this.
+      - /var/run/docker.sock:/var/run/docker.sock
+
+      # Where the backups land on the host.
+      - /srv/backups:/backups
+
+      # Compose directories, mounted at an IDENTICAL path.
+      #
+      # This is not cosmetic. Compose creates containers on the host daemon but
+      # resolves relative paths against *our* filesystem, so a compose file
+      # mounted anywhere else silently produces containers with the wrong bind
+      # mounts. Same path in, same path out.
+      - /etc/komodo/repos:/etc/komodo/repos:ro
+      - /opt:/opt:ro
+
+      # Optional: registry credentials from this host's docker login. Needed for
+      # private images that Komodo does not hold credentials for.
+      # - /root/.docker/config.json:/root/.docker/config.json:ro
+
+      # Optional: rule file.
+      # - ./rules.yaml:/etc/backup-tower/rules.yaml:ro
+
+# Labelling a container is what opts it in. On the container you want updated:
+#
+#   labels:
+#     tower.enable: "true"
+#     tower.snapshot.stop: "always"   # consistent snapshot, brief downtime
+#     tower.rollback: "true"          # undo automatically if it fails to start
+#     tower.schedule: "0 4 * * *"     # nightly backup as well

@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/Hudint/backup-tower/internal/schedule"
 )
 
 // RuleFile is the optional YAML configuration.
@@ -129,6 +131,11 @@ func validateSettings(s Settings) error {
 	if s.Strategy != nil {
 		if _, err := ParseStrategy(*s.Strategy); err != nil {
 			return fmt.Errorf("strategy: %w", err)
+		}
+	}
+	if s.Schedule != nil && *s.Schedule != "" {
+		if _, err := schedule.Parse(*s.Schedule); err != nil {
+			return fmt.Errorf("schedule: %w", err)
 		}
 	}
 	if s.RetentionKeep != nil && *s.RetentionKeep < 0 {

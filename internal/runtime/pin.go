@@ -59,6 +59,26 @@ func (c *Client) UnpinImage(ctx context.Context, tag string) error {
 	return nil
 }
 
+// ListPins returns every image tag backup-tower is holding on to.
+func (c *Client) ListPins(ctx context.Context) ([]string, error) {
+	filters := client.Filters{}
+	filters.Add("reference", KeepRepo+":*")
+
+	res, err := c.api.ImageList(ctx, client.ImageListOptions{Filters: filters})
+	if err != nil {
+		return nil, fmt.Errorf("list pinned images: %w", err)
+	}
+	var out []string
+	for _, img := range res.Items {
+		for _, tag := range img.RepoTags {
+			if strings.HasPrefix(tag, KeepRepo+":") {
+				out = append(out, tag)
+			}
+		}
+	}
+	return out, nil
+}
+
 // HasImage reports whether a reference resolves locally.
 func (c *Client) HasImage(ctx context.Context, ref string) bool {
 	_, err := c.api.ImageInspect(ctx, ref)

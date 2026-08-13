@@ -8,6 +8,9 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Hudint/backup-tower/internal/discover"
+	"github.com/Hudint/backup-tower/internal/schedule"
+	"github.com/Hudint/backup-tower/internal/snapshot"
+	"github.com/Hudint/backup-tower/internal/snapshot/source"
 	"github.com/Hudint/backup-tower/internal/update"
 )
 
@@ -65,20 +68,30 @@ func newDaemonCmd() *cobra.Command {
 				}
 			}
 
-			ticker := time.NewTicker(interval)
-			defer ticker.Stop()
+			updates := time.NewTicker(interval)
+			defer updates.Stop()
+
+			// Scheduled backups are checked every minute, which is the finest
+			// resolution a cron expression can ask for.
+			backups := time.NewTicker(time.Minute)
+			defer backups.Stop()
+			scheduler := schedule.NewChecker(e.store, time.Now())
 
 			for {
 				select {
 				case <-cmd.Context().Done():
 					e.log.Info("daemon stopping")
 					return nil
-				case <-ticker.C:
+				case <-updates.C:
 					if err := daemonPass(cmd, e, updater, opts); err != nil {
 						// A failing pass must not end the daemon: the next one
 						// may well succeed, and a silent exit would look exactly
 						// like a daemon that is running fine.
 						e.log.Error("update pass failed", "error", err)
+					}
+				case <-backups.C:
+					if err := scheduledBackups(cmd, e, scheduler, forceHelper); err != nil {
+						e.log.Error("scheduled backup pass failed", "error", err)
 					}
 				}
 			}
@@ -144,6 +157,23 @@ func daemonPass(cmd *cobra.Command, e *env, updater *update.Updater, opts update
 		}
 	}
 
+	// Updates create snapshots too, so retention has to run here as well —
+	// otherwise a container that is updated often but never on a schedule would
+	// accumulate snapshots without limit.
+	if updated > 0 {
+		pruner := snapshot.NewPruner(e.store, e.rt, e.log)
+		for _, c := range enabled {
+			p := c.Decision.Policy
+			policy := snapshot.Retention{Keep: p.RetentionKeep, Days: p.RetentionDays, ProtectManual: true}
+			if policy.Valid() != nil {
+				continue
+			}
+			if _, err := pruner.Prune(ctx, c.Container.Name, policy, false); err != nil {
+				e.log.Warn("retention failed", "container", c.Container.Name, "error", err)
+			}
+		}
+	}
+
 	e.log.Info("update pass finished",
 		"containers", len(enabled), "updated", updated, "up_to_date", upToDate,
 		"failed", failed, "took", time.Since(started).Round(time.Second))
@@ -155,4 +185,87 @@ func snapshotID(r *update.Result) string {
 		return ""
 	}
 	return r.Snapshot.ID
+}
+
+// scheduledBackups takes the backups that are due right now.
+//
+// These are separate from updates on purpose: a container can be worth backing
+// up nightly without ever being updated automatically, and the two decisions
+// belong to different people often enough that tying them together would be
+// wrong.
+func scheduledBackups(cmd *cobra.Command, e *env, scheduler *schedule.Checker, forceHelper bool) error {
+	ctx := cmd.Context()
+
+	sel, _, err := buildSelector(ctx, e.cfg, e.rt, true)
+	if err != nil {
+		return err
+	}
+	candidates, err := sel.Select(ctx, false)
+	if err != nil {
+		return err
+	}
+
+	srcOpts := source.Options{HelperImage: e.cfg.HelperImage}
+	if forceHelper {
+		srcOpts.Force = source.MethodHelper
+	}
+	taker := snapshot.NewTaker(e.rt, e.store, source.New(e.rt, srcOpts), toolName(), e.log)
+	pruner := snapshot.NewPruner(e.store, e.rt, e.log)
+
+	var errs []error
+	for _, c := range candidates {
+		policy := c.Decision.Policy
+		if policy.Schedule == "" {
+			continue
+		}
+		due, err := scheduler.Check(ctx, c.Container.Name, policy.Schedule, time.Now())
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", c.Container.Name, err))
+			continue
+		}
+		if due == nil {
+			continue
+		}
+
+		e.log.Info("scheduled backup due",
+			"container", c.Container.Name, "schedule", policy.Schedule,
+			"scheduled_for", due.ScheduledFor.Format(time.RFC3339))
+
+		// A scheduled backup defaults to reading hot. Creating downtime on a
+		// timer is not a decision to make on the operator's behalf; stopping
+		// first is available, but has to be asked for.
+		stop := policy.Stop
+		if stop == snapshot.StopAuto {
+			stop = snapshot.StopNever
+		}
+		m, err := taker.Take(ctx, c.Container.ID, snapshot.Options{
+			Trigger:      snapshot.TriggerSchedule,
+			Stop:         stop,
+			IncludeBinds: policy.IncludeBinds,
+			Level:        e.cfg.ZstdLevel,
+		})
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", c.Container.Name, err))
+			continue
+		}
+		e.log.Info("scheduled backup complete",
+			"container", c.Container.Name, "snapshot", m.ID,
+			"quiesce", m.Quiesce, "bytes", m.ArchiveBytes())
+
+		// Prune straight afterwards, so the backup directory cannot grow past
+		// the policy between two housekeeping runs.
+		policyRetention := snapshot.Retention{
+			Keep:          policy.RetentionKeep,
+			Days:          policy.RetentionDays,
+			ProtectManual: true,
+		}
+		if err := policyRetention.Valid(); err != nil {
+			e.log.Warn("retention not applied", "container", c.Container.Name, "error", err)
+			continue
+		}
+		if _, err := pruner.Prune(ctx, c.Container.Name, policyRetention, false); err != nil {
+			e.log.Warn("retention failed", "container", c.Container.Name, "error", err)
+		}
+	}
+	return errors.Join(errs...)
 }
