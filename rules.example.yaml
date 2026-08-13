@@ -1,0 +1,75 @@
+# Example rule file for backup-tower.
+#
+# Rules exist for what labels cannot reach: containers whose compose file you do
+# not control, or a policy that should apply to a whole group without editing
+# every service definition. Point TOWER_RULES_FILE at a copy of this.
+#
+# Precedence is label > rule file > built-in default. Labels win because they sit
+# on the container itself, which is the most specific statement of intent
+# available.
+#
+# Rules are applied in order and later matches override earlier ones, so the
+# natural way to write them is broad first, specific last.
+
+# Applied to every container before any rule.
+defaults:
+  retention_keep: 3
+  retention_days: 14
+
+rules:
+  # Report available updates for your own images without applying any. A good
+  # first step: it shows what would happen without anything happening.
+  - name: watch my own images
+    match:
+      image: ["ghcr.io/hudint/*"]
+    set:
+      enable: true
+      monitor_only: true
+
+  # A whole compose project, with a consistent snapshot before each update.
+  - name: the infra stack
+    match:
+      compose_project: ["infra"]
+    set:
+      enable: true
+      stop: always # stop the container so the snapshot is consistent
+      rollback: true # undo the update automatically if the health gate fails
+
+  # Broad first, specific last: this exempts the database from the rule above.
+  - name: but not the database
+    match:
+      name: ["infra-db-*"]
+    set:
+      enable: false
+
+  # Nightly backups without updating anything.
+  - name: nightly backups for stateful services
+    match:
+      labels:
+        stateful: "" # an empty value matches any value, so this tests presence
+    set:
+      schedule: "0 4 * * *"
+      stop: never # do not create downtime on a schedule
+      retention_keep: 7
+
+  # Bind mounts are skipped by default because they are frequently large media
+  # directories. Opt in where the data actually lives there.
+  - name: services that store data in bind mounts
+    match:
+      name: ["gitea", "sinusbot"]
+    set:
+      binds: true
+
+# Available match conditions (all must hold; an empty match block matches
+# everything):
+#
+#   name:            list of globs against the container name
+#   name_regex:      a regular expression against the container name
+#   compose_project: list of globs against the compose project
+#   image:           list of globs against the configured image reference
+#   labels:          map of label to expected value; "" matches any value
+#
+# Available settings:
+#
+#   enable, monitor_only, snapshot, binds, stop, schedule,
+#   retention_keep, retention_days, rollback, strategy, hooks

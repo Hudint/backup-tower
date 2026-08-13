@@ -17,13 +17,14 @@ check image → stop container → snapshot (cold, consistent)
 
 ## Status
 
-Milestones 1 and 2 of 5 are complete: snapshots work, and so does the way back.
+Milestones 1 to 3 of 5 are complete. Snapshots work, the way back works, and
+backup-tower can say exactly which containers it would act on.
 
 | | |
 |---|---|
 | ✅ M1 | Snapshot container configuration, named volumes and bind mounts |
 | ✅ M2 | Restore and rollback |
-| ⬜ M3 | Selection engine and dry run |
+| ✅ M3 | Selection engine and dry run |
 | ⬜ M4 | Update engine with health gate |
 | ⬜ M5 | Scheduling, retention, packaging |
 
@@ -48,6 +49,8 @@ is covered by a test that extracts an archive with the system `tar` binary.
 
 ```sh
 backup-tower info                          # what engine am I talking to
+backup-tower plan                          # what would be acted on, and why
+backup-tower plan --explain webapp         # the full reasoning for one container
 backup-tower snapshot webapp               # snapshot, container keeps running
 backup-tower snapshot webapp --stop always # stop first for a consistent copy
 backup-tower snapshot webapp --binds       # include bind-mounted host paths
@@ -94,6 +97,79 @@ replacement exists; if anything fails in between, the original is put back under
 its own name. A rollback that leaves you with no container at all would be a
 worse failure than the one it was fixing.
 
+## Selecting containers
+
+**Automatic updates are opt-in.** Nothing is updated unless something says so,
+and there is no built-in blocklist: which containers are safe to update is the
+operator's decision, not the tool's.
+
+`plan` is how you check that before enabling anything. On a host with no labels
+set it must show nothing selected — and if it does not, that is exactly what you
+want to find out beforehand:
+
+```
+$ backup-tower plan
+CONTAINER      ACTION   STRATEGY  SNAPSHOT      SCHEDULE   ENABLED BY           NOTE
+webapp         update   compose   always+binds  -          label: tower.enable
+db             monitor  -         auto          0 4 * * *  rule: "the db"
+
+102 containers, 1 would be updated, 1 monitored only, 1 scheduled backups
+```
+
+`--all` lists everything including the containers that were not selected,
+`--explain <container>` prints the full reasoning for one of them.
+
+Three sources feed the decision, in precedence order **label > rule file >
+default**. Labels win because they sit on the container itself.
+
+### Labels
+
+| Label | Default | Meaning |
+|---|---|---|
+| `tower.enable` | `false` | Opt in to automatic updates |
+| `tower.monitor-only` | `false` | Report available updates without applying them |
+| `tower.snapshot` | `true` | Snapshot before updating |
+| `tower.snapshot.binds` | `false` | Include bind-mounted host paths |
+| `tower.snapshot.stop` | `auto` | `auto`, `always` or `never` |
+| `tower.schedule` | — | Cron expression for backups independent of updates |
+| `tower.retention.keep` / `.days` | `3` / `14` | Retention override |
+| `tower.rollback` | `false` | Undo automatically when the health gate fails |
+| `tower.strategy` | `auto` | `auto`, `compose` or `recreate` |
+| `tower.hook.pre-snapshot` / `.pre-update` / `.post-update` | — | Command run inside the container |
+
+Only the `tower.*` namespace is read. Labels belonging to other tools —
+Watchtower's in particular — are deliberately ignored: acting on them would mean
+touching containers that were marked for something else.
+
+A misspelled `tower.*` label is reported as a problem rather than ignored. A typo
+in the label that was meant to enable or protect a container otherwise stays
+invisible until it matters.
+
+### Rule file
+
+For what labels cannot reach. See [`rules.example.yaml`](rules.example.yaml);
+point `TOWER_RULES_FILE` at your copy. Rules are applied in order and later
+matches override earlier ones, so broad-first, specific-last works naturally.
+Unknown keys are rejected at load time.
+
+### Komodo
+
+Komodo is used purely as an additional selection source: it answers "which stacks
+did the operator tag", and nothing else. Updates still go through the normal
+path, which keeps the coupling to a single read call.
+
+Tagged stacks resolve to local containers through their compose project name,
+tagged deployments through their container name. Komodo manages several hosts
+while backup-tower only sees its own, so set `KOMODO_SERVER` when a tag spans
+more than one — without it you get a warning rather than a guess.
+
+### What cannot be updated
+
+Containers on locally built images have no registry to check, and containers
+referencing an image only by ID have no name left to resolve. Both are reported
+as such and skipped rather than failing on every run. Snapshots still work for
+them.
+
 ## Configuration
 
 | Variable | Default | Meaning |
@@ -105,6 +181,9 @@ worse failure than the one it was fixing.
 | `TOWER_RETENTION_KEEP` | `3` | Snapshots to keep per container. |
 | `TOWER_RETENTION_DAYS` | `14` | Minimum age to keep. |
 | `TOWER_INTERVAL` | `6h` | Update check interval. |
+| `TOWER_RULES_FILE` | — | Selection rules; absent is the normal case. |
+| `KOMODO_URL` / `_API_KEY` / `_API_SECRET` / `_TAG` | — | Komodo as a selection source; all four required. |
+| `KOMODO_SERVER` | — | Restrict to one Komodo server on multi-host setups. |
 | `DOCKER_HOST` | platform default | Engine endpoint. |
 
 ## How volumes are read

@@ -38,6 +38,55 @@ type Config struct {
 	RetentionDays int
 
 	Interval time.Duration
+
+	// RulesFile holds selection rules and per-container overrides. Absent is
+	// the normal case; labels alone are enough for most setups.
+	RulesFile string
+
+	Komodo KomodoSettings
+}
+
+// KomodoSettings configures Komodo as an additional selection source.
+type KomodoSettings struct {
+	URL       string
+	APIKey    string
+	APISecret string
+	// Tag marks the stacks and deployments that opt in.
+	Tag string
+	// Server restricts results to one Komodo server; empty auto-detects and
+	// warns when the tag spans several.
+	Server string
+}
+
+// Configured reports whether Komodo can be queried.
+func (k KomodoSettings) Configured() bool {
+	return k.URL != "" && k.APIKey != "" && k.APISecret != "" && k.Tag != ""
+}
+
+// Partial reports whether Komodo was half-configured, which is almost always a
+// mistake worth pointing out rather than silently ignoring.
+func (k KomodoSettings) Partial() bool {
+	any := k.URL != "" || k.APIKey != "" || k.APISecret != "" || k.Tag != ""
+	return any && !k.Configured()
+}
+
+// Missing names the Komodo settings that still need to be supplied.
+func (k KomodoSettings) Missing() []string {
+	var out []string
+	for _, f := range []struct {
+		env   string
+		value string
+	}{
+		{"KOMODO_URL", k.URL},
+		{"KOMODO_API_KEY", k.APIKey},
+		{"KOMODO_API_SECRET", k.APISecret},
+		{"KOMODO_TAG", k.Tag},
+	} {
+		if f.value == "" {
+			out = append(out, f.env)
+		}
+	}
+	return out
 }
 
 // FromEnv reads the environment, falling back to the defaults.
@@ -56,6 +105,17 @@ func FromEnv() (Config, error) {
 	}
 	if v := os.Getenv("TOWER_HELPER_IMAGE"); v != "" {
 		c.HelperImage = v
+	}
+	if v := os.Getenv("TOWER_RULES_FILE"); v != "" {
+		c.RulesFile = v
+	}
+
+	c.Komodo = KomodoSettings{
+		URL:       os.Getenv("KOMODO_URL"),
+		APIKey:    os.Getenv("KOMODO_API_KEY"),
+		APISecret: os.Getenv("KOMODO_API_SECRET"),
+		Tag:       os.Getenv("KOMODO_TAG"),
+		Server:    os.Getenv("KOMODO_SERVER"),
 	}
 
 	var err error
