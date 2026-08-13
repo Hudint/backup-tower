@@ -311,11 +311,12 @@ by Komodo's periphery agent, which logs in *inside its own container*. None of
 that reaches the host's docker configuration, so those images look simply
 unreachable from here.
 
-Whether Komodo's API hands out the token or redacts it is decided by your Komodo
-version. If it comes back empty, backup-tower says so specifically —
-*"komodo knows this registry but returned no usable token; log in with docker
-login on this host instead"* — rather than reporting a bare authentication
-failure that sends you looking in the wrong place.
+Komodo does hand out the tokens (verified against 2.2.0 and 2.3.2). It renamed
+the request in v2.3.0, so both names are tried — pinning either one means the
+tool silently stops finding credentials on one side of that boundary. If an
+account ever does come back without a secret, backup-tower says so specifically
+rather than reporting a bare authentication failure that sends you looking in
+the wrong place.
 
 Credential helpers (`credsStore` in config.json) cannot be called by this build,
 and are reported as such.

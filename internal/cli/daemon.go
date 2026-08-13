@@ -144,7 +144,7 @@ func daemonPass(cmd *cobra.Command, e *env, updater *update.Updater, opts update
 		case update.OutcomeUpdated:
 			updated++
 			e.log.Info("container updated", "container", res.Container, "took", res.Duration.Round(time.Second))
-		case update.OutcomeUpToDate:
+		case update.OutcomeUpToDate, update.OutcomeNoChange:
 			upToDate++
 		case update.OutcomeFailed, update.OutcomeRolledBack:
 			failed++

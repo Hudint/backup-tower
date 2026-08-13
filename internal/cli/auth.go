@@ -36,6 +36,10 @@ func buildRegistryAuth(ctx context.Context, e *env) (*runtime.RegistryAuth, []st
 		Server:    e.cfg.Komodo.Server,
 	})
 
+	if v, err := client.Version(ctx); err == nil {
+		notes = append(notes, "komodo: version "+v)
+	}
+
 	accounts, err := client.RegistryAccounts(ctx)
 	if err != nil {
 		// Not fatal: the host may well have the credentials anyway, and losing

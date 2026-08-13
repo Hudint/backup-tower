@@ -163,7 +163,7 @@ func summariseUpdates(out io.Writer, results []*update.Result, dryRun bool) erro
 			failed++
 		case update.OutcomeReported, update.OutcomeWouldUpdate:
 			available++
-		case update.OutcomeUpToDate:
+		case update.OutcomeUpToDate, update.OutcomeNoChange:
 			upToDate++
 		case update.OutcomeSkipped:
 			skipped++

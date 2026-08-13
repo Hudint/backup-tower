@@ -138,3 +138,54 @@ func TestKomodoReportsServerErrorsWithContext(t *testing.T) {
 		t.Errorf("error does not mention what the server said: %v", err)
 	}
 }
+
+func TestRegistryAccountsFallBackToTheOlderRequestName(t *testing.T) {
+	// Komodo renamed this request in v2.3.0. Pinning either name means the tool
+	// silently stops finding credentials on one side of that boundary — which is
+	// exactly how this was found: against an instance older than the docs.
+	var asked []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		name := strings.TrimPrefix(r.URL.Path, "/read/")
+		asked = append(asked, name)
+		w.Header().Set("content-type", "application/json")
+		if name == "ListImageRegistryAccounts" {
+			w.WriteHeader(http.StatusBadRequest)
+			io.WriteString(w, `{"error":"unknown variant `+"`"+`ListImageRegistryAccounts`+"`"+`, expected one of ..."}`)
+			return
+		}
+		io.WriteString(w, `[{"domain":"ghcr.io","username":"someone","token":"secret"}]`)
+	}))
+	defer srv.Close()
+
+	c := NewKomodoClient(KomodoConfig{URL: srv.URL, APIKey: "k", APISecret: "s", Tag: "t"})
+	accounts, err := c.RegistryAccounts(context.Background())
+	if err != nil {
+		t.Fatalf("RegistryAccounts: %v", err)
+	}
+	if len(asked) != 2 || asked[0] != "ListImageRegistryAccounts" || asked[1] != "ListDockerRegistryAccounts" {
+		t.Errorf("request sequence = %v, want the new name then the old one", asked)
+	}
+	if len(accounts) != 1 || accounts[0].Domain != "ghcr.io" || accounts[0].Token != "secret" {
+		t.Errorf("accounts = %+v", accounts)
+	}
+}
+
+func TestUnrelatedErrorsAreNotRetried(t *testing.T) {
+	// Only an unknown request name justifies a second attempt; retrying an
+	// authentication failure under a different name would just obscure it.
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusUnauthorized)
+		io.WriteString(w, `{"error":"invalid api key"}`)
+	}))
+	defer srv.Close()
+
+	c := NewKomodoClient(KomodoConfig{URL: srv.URL, APIKey: "k", APISecret: "s", Tag: "t"})
+	if _, err := c.RegistryAccounts(context.Background()); err == nil {
+		t.Fatal("an authentication failure was not reported")
+	}
+	if calls != 1 {
+		t.Errorf("made %d calls, want 1 — an auth failure is not a reason to try another name", calls)
+	}
+}

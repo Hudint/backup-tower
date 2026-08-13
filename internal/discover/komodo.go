@@ -154,7 +154,14 @@ type RegistryAccount struct {
 // of that reaches the host's docker configuration, so a private image looks
 // simply unreachable from here — asking Komodo is the only way to see it.
 func (c *KomodoClient) RegistryAccounts(ctx context.Context) ([]RegistryAccount, error) {
+	// Komodo renamed this request in v2.3.0. Both names are tried rather than
+	// pinning a version, because the alternative is a tool that silently stops
+	// finding credentials the day someone upgrades — or, as here, one that never
+	// found them because the instance was older than the docs.
 	body, err := c.post(ctx, "ListImageRegistryAccounts", map[string]any{})
+	if err != nil && isUnknownRequest(err) {
+		body, err = c.post(ctx, "ListDockerRegistryAccounts", map[string]any{})
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -163,6 +170,27 @@ func (c *KomodoClient) RegistryAccounts(ctx context.Context) ([]RegistryAccount,
 		return nil, fmt.Errorf("decode Komodo registry accounts: %w", err)
 	}
 	return out, nil
+}
+
+// isUnknownRequest recognises Komodo rejecting a request name it does not know,
+// which is how a version difference shows up.
+func isUnknownRequest(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "unknown variant")
+}
+
+// Version reports the Komodo version, for diagnostics.
+func (c *KomodoClient) Version(ctx context.Context) (string, error) {
+	body, err := c.post(ctx, "GetVersion", map[string]any{})
+	if err != nil {
+		return "", err
+	}
+	var out struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return "", fmt.Errorf("decode Komodo version: %w", err)
+	}
+	return out.Version, nil
 }
 
 func (c *KomodoClient) onThisServer(r KomodoResource) bool {

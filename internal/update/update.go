@@ -25,6 +25,10 @@ const (
 	OutcomeFailed      Outcome = "failed"
 	OutcomeWouldUpdate Outcome = "would-update"
 	OutcomeReported    Outcome = "update-available"
+	// OutcomeNoChange means the strategy ran and decided nothing needed doing.
+	// Compose reaches this conclusion whenever the image and the configuration
+	// it computes are both unchanged.
+	OutcomeNoChange Outcome = "no-change"
 )
 
 // Result is the record of one container's update attempt.
@@ -217,6 +221,11 @@ func (u *Updater) Update(ctx context.Context, cand *discover.Candidate, opts Opt
 		return res
 	}
 
+	// A strategy that hands back the same container did not replace anything.
+	// Reporting that as an update would be a false statement, and this tool is
+	// worth exactly as much as its reports are.
+	replaced := newID != cand.Container.ID
+
 	res.Health = checkHealth(ctx, u.rt, newID, opts.Health)
 	if !res.Health.Passed() {
 		res.Outcome = OutcomeFailed
@@ -235,10 +244,14 @@ func (u *Updater) Update(ctx context.Context, cand *discover.Candidate, opts Opt
 	}
 
 	res.Outcome = OutcomeUpdated
-	u.log.Info("updated container",
+	if !replaced {
+		res.Outcome = OutcomeNoChange
+	}
+	u.log.Info("update finished",
+		"outcome", res.Outcome,
 		"container", cand.Container.Name, "image", reference,
 		"strategy", res.Strategy, "health", res.Health.Method,
-		"took", res.Duration.Round(time.Millisecond))
+		"took", time.Since(started).Round(time.Millisecond))
 	return res
 }
 
@@ -376,6 +389,8 @@ func (r *Result) Describe() string {
 			return "updated (health verified only by staying up)"
 		}
 		return "updated"
+	case OutcomeNoChange:
+		return "no change was needed: " + string(r.Strategy) + " considered the container current"
 	case OutcomeRolledBack:
 		return "update failed and was rolled back: " + errText(r.Err)
 	case OutcomeFailed:
