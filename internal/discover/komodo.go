@@ -140,6 +140,31 @@ func (c *KomodoClient) Tagged(ctx context.Context) (*KomodoSelection, error) {
 	return sel, nil
 }
 
+// RegistryAccount is a set of registry credentials Komodo holds.
+type RegistryAccount struct {
+	Domain   string `json:"domain"`
+	Username string `json:"username"`
+	Token    string `json:"token"`
+}
+
+// RegistryAccounts fetches the registry credentials Komodo manages.
+//
+// Images belonging to Komodo-managed stacks are pulled by Komodo's periphery
+// agent, which logs in with these credentials inside its own container. Nothing
+// of that reaches the host's docker configuration, so a private image looks
+// simply unreachable from here — asking Komodo is the only way to see it.
+func (c *KomodoClient) RegistryAccounts(ctx context.Context) ([]RegistryAccount, error) {
+	body, err := c.post(ctx, "ListImageRegistryAccounts", map[string]any{})
+	if err != nil {
+		return nil, err
+	}
+	var out []RegistryAccount
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("decode Komodo registry accounts: %w", err)
+	}
+	return out, nil
+}
+
 func (c *KomodoClient) onThisServer(r KomodoResource) bool {
 	if c.cfg.Server == "" {
 		return true
@@ -150,12 +175,25 @@ func (c *KomodoClient) onThisServer(r KomodoResource) bool {
 // list issues one read request. Komodo puts the request type in the path and
 // takes the parameters as the body.
 func (c *KomodoClient) list(ctx context.Context, requestType string) ([]KomodoResource, error) {
-	body, err := json.Marshal(map[string]any{
+	body, err := c.post(ctx, requestType, map[string]any{
 		"query": map[string]any{
 			"tags":         []string{c.cfg.Tag},
 			"tag_behavior": "Any",
 		},
 	})
+	if err != nil {
+		return nil, err
+	}
+	var out []KomodoResource
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("decode Komodo %s response: %w", requestType, err)
+	}
+	return out, nil
+}
+
+// post performs one read request and returns the raw response body.
+func (c *KomodoClient) post(ctx context.Context, requestType string, params map[string]any) ([]byte, error) {
+	body, err := json.Marshal(params)
 	if err != nil {
 		return nil, fmt.Errorf("encode %s request: %w", requestType, err)
 	}
@@ -181,17 +219,11 @@ func (c *KomodoClient) list(ctx context.Context, requestType string) ([]KomodoRe
 	if err != nil {
 		return nil, fmt.Errorf("read Komodo %s response: %w", requestType, err)
 	}
-
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("Komodo %s returned %s: %s",
 			requestType, resp.Status, strings.TrimSpace(truncate(string(payload), 300)))
 	}
-
-	var out []KomodoResource
-	if err := json.Unmarshal(payload, &out); err != nil {
-		return nil, fmt.Errorf("decode Komodo %s response: %w", requestType, err)
-	}
-	return out, nil
+	return payload, nil
 }
 
 func truncate(s string, n int) string {

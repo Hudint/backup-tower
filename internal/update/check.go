@@ -89,15 +89,18 @@ func (c *Checker) Check(ctx context.Context, cand *discover.Candidate) *Check {
 		return out
 	}
 
-	remote, err := c.rt.RemoteDigest(ctx, out.Reference, c.auth.For(out.Reference))
+	remote, err := c.remoteDigest(ctx, out.Reference)
 	if err != nil {
 		out.State = StateFailed
 		out.Err = err
 		switch {
+		case isAuthError(err) && c.auth.RedactedSource(out.Reference) != "":
+			out.Reason = fmt.Sprintf("%s knows this registry but returned no usable token; log in with docker login on this host instead",
+				c.auth.RedactedSource(out.Reference))
 		case isAuthError(err) && c.auth.HasHelperOnly(out.Reference):
 			out.Reason = "the registry needs credentials that are stored in a credential helper this build cannot call"
 		case isAuthError(err):
-			out.Reason = "the registry needs credentials; log in with docker login so they land in config.json"
+			out.Reason = "the registry needs credentials; log in with docker login, or let Komodo supply them"
 		default:
 			out.Reason = "the registry could not be reached"
 		}
@@ -112,6 +115,29 @@ func (c *Checker) Check(ctx context.Context, cand *discover.Candidate) *Check {
 	out.State = StateUpdateAvailable
 	return out
 }
+
+// remoteDigest tries each set of credentials in turn. Which source holds the
+// right secret for a registry is not knowable in advance, so asking is cheaper
+// than guessing — and only the last failure is worth reporting.
+func (c *Checker) remoteDigest(ctx context.Context, ref string) (string, error) {
+	var lastErr error
+	for _, auth := range c.auth.Attempts(ref) {
+		digest, err := c.rt.RemoteDigest(ctx, ref, auth)
+		if err == nil {
+			return digest, nil
+		}
+		lastErr = err
+		if !isAuthError(err) {
+			// A registry that cannot be reached will not be reached with other
+			// credentials either.
+			break
+		}
+	}
+	return "", lastErr
+}
+
+// Auth exposes the resolved credentials so a pull can use the same ones.
+func (c *Checker) Auth() *runtime.RegistryAuth { return c.auth }
 
 // Describe renders a check result as one line.
 func (c *Check) Describe() string {

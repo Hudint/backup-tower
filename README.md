@@ -235,6 +235,29 @@ tagged deployments through their container name. Komodo manages several hosts
 while backup-tower only sees its own, so set `KOMODO_SERVER` when a tag spans
 more than one — without it you get a warning rather than a guess.
 
+### Registry credentials
+
+Private images need credentials for the digest check and the pull. Two sources
+are used, and both are tried in turn rather than ranked — credentials are
+per-registry, not per-container, so any precedence rule would be a guess:
+
+1. **This host's `docker login`** (`~/.docker/config.json`, or `DOCKER_CONFIG`).
+2. **Komodo's registry accounts**, when Komodo is configured.
+
+The second matters because images belonging to Komodo-managed stacks are pulled
+by Komodo's periphery agent, which logs in *inside its own container*. None of
+that reaches the host's docker configuration, so those images look simply
+unreachable from here.
+
+Whether Komodo's API hands out the token or redacts it is decided by your Komodo
+version. If it comes back empty, backup-tower says so specifically —
+*"komodo knows this registry but returned no usable token; log in with docker
+login on this host instead"* — rather than reporting a bare authentication
+failure that sends you looking in the wrong place.
+
+Credential helpers (`credsStore` in config.json) cannot be called by this build,
+and are reported as such.
+
 ### What cannot be updated
 
 Containers on locally built images have no registry to check, and containers

@@ -28,9 +28,101 @@ const dockerHubConfigKey = "https://index.docker.io/v1/"
 type RegistryAuth struct {
 	// byRegistry maps a config.json key to an encoded auth header value.
 	byRegistry map[string]string
+	// extra holds credentials from other sources, keyed by domain. Several may
+	// exist for one domain.
+	extra map[string][]namedAuth
 	// helperRegistries are registries whose credentials live in an external
 	// credential helper we cannot call.
 	helperRegistries []string
+	// emptyTokens records sources that named a registry but supplied no secret,
+	// which is what a redacted API response looks like.
+	emptyTokens map[string]string
+}
+
+type namedAuth struct {
+	source  string
+	encoded string
+}
+
+// AddCredentials registers credentials from a source other than the docker
+// configuration, such as Komodo's registry accounts.
+//
+// Nothing here tries to decide which source outranks which. Credentials are
+// per-registry, not per-container, so any ordering would be a guess; instead
+// every candidate is tried in turn, which is both cheaper and more honest than
+// being wrong about precedence.
+func (a *RegistryAuth) AddCredentials(source, domain, username, token string) {
+	if a.extra == nil {
+		a.extra = map[string][]namedAuth{}
+	}
+	if a.emptyTokens == nil {
+		a.emptyTokens = map[string]string{}
+	}
+	domain = normaliseDomain(domain)
+	if domain == "" {
+		return
+	}
+	if token == "" && username == "" {
+		// A named account with nothing in it is almost always a redacted API
+		// response, and saying so beats reporting a plain authentication failure.
+		a.emptyTokens[domain] = source
+		return
+	}
+	encoded, err := encodeAuth(registry.AuthConfig{
+		Username:      username,
+		Password:      token,
+		ServerAddress: domain,
+	})
+	if err != nil {
+		return
+	}
+	a.extra[domain] = append(a.extra[domain], namedAuth{source: source, encoded: encoded})
+}
+
+// RedactedSource names the source that knows about a reference's registry but
+// handed over no usable secret, empty when there is none.
+func (a *RegistryAuth) RedactedSource(ref string) string {
+	if a == nil || len(a.emptyTokens) == 0 {
+		return ""
+	}
+	return a.emptyTokens[domainOf(ref)]
+}
+
+// normaliseDomain reduces the many ways Docker Hub is written to the one form
+// image references actually use. Credentials for it are conventionally stored
+// under a URL, which matches no image reference at all.
+func normaliseDomain(domain string) string {
+	domain = strings.TrimPrefix(strings.TrimPrefix(domain, "https://"), "http://")
+	domain = strings.Trim(domain, "/")
+	switch domain {
+	case "index.docker.io/v1", "index.docker.io", "registry-1.docker.io", "docker.io":
+		return "docker.io"
+	}
+	return domain
+}
+
+func domainOf(ref string) string {
+	named, err := reference.ParseNormalizedNamed(ref)
+	if err != nil {
+		return ""
+	}
+	return reference.Domain(named)
+}
+
+// Attempts returns the credentials to try for a reference, in order, ending with
+// the anonymous attempt so a public image still works.
+func (a *RegistryAuth) Attempts(ref string) []string {
+	if a == nil {
+		return []string{""}
+	}
+	var out []string
+	if host := a.For(ref); host != "" {
+		out = append(out, host)
+	}
+	for _, extra := range a.extra[domainOf(ref)] {
+		out = append(out, extra.encoded)
+	}
+	return append(out, "")
 }
 
 // LoadRegistryAuth reads the docker CLI configuration. A missing file is not an

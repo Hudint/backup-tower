@@ -9,7 +9,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Hudint/backup-tower/internal/discover"
-	"github.com/Hudint/backup-tower/internal/runtime"
 	"github.com/Hudint/backup-tower/internal/snapshot/source"
 	"github.com/Hudint/backup-tower/internal/update"
 )
@@ -115,9 +114,12 @@ func newUpdateCmd() *cobra.Command {
 }
 
 func newUpdater(ctx context.Context, e *env, forceHelper bool) (*update.Updater, error) {
-	auth, err := runtime.LoadRegistryAuth("")
+	auth, notes, err := buildRegistryAuth(ctx, e)
 	if err != nil {
 		return nil, err
+	}
+	for _, n := range notes {
+		e.log.Info("registry credentials", "detail", n)
 	}
 	srcOpts := source.Options{HelperImage: e.cfg.HelperImage}
 	if forceHelper {

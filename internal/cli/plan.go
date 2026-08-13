@@ -145,9 +145,12 @@ func buildSelector(ctx context.Context, cfg config.Config, rt *runtime.Client, n
 // carried in the result rather than aborting: one unreachable registry must not
 // hide the state of every other container.
 func runChecks(ctx context.Context, e *env, candidates []*discover.Candidate, all bool) (map[string]*update.Check, error) {
-	auth, err := runtime.LoadRegistryAuth("")
+	auth, notes, err := buildRegistryAuth(ctx, e)
 	if err != nil {
 		return nil, err
+	}
+	for _, n := range notes {
+		e.log.Info("registry credentials", "detail", n)
 	}
 	checker := update.NewChecker(e.rt, auth)
 

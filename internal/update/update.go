@@ -145,7 +145,7 @@ func (u *Updater) Update(ctx context.Context, cand *discover.Candidate, opts Opt
 	// download never counts as downtime.
 	reference := res.Check.Reference
 	u.log.Info("pulling image", "container", cand.Container.Name, "image", reference)
-	if err := u.rt.PullImage(ctx, reference, u.checker.auth.For(reference)); err != nil {
+	if err := u.pull(ctx, reference); err != nil {
 		res.Outcome = OutcomeFailed
 		res.Err = err
 		return res
@@ -240,6 +240,21 @@ func (u *Updater) Update(ctx context.Context, cand *discover.Candidate, opts Opt
 		"strategy", res.Strategy, "health", res.Health.Method,
 		"took", res.Duration.Round(time.Millisecond))
 	return res
+}
+
+// pull fetches the image, trying each set of credentials the same way the check
+// did. Doing otherwise would let a check succeed and the pull that follows it
+// fail for want of the very credentials that just worked.
+func (u *Updater) pull(ctx context.Context, reference string) error {
+	var lastErr error
+	for _, auth := range u.checker.Auth().Attempts(reference) {
+		err := u.rt.PullImage(ctx, reference, auth)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+	}
+	return lastErr
 }
 
 // rollbackIfPossible undoes a failed update when the policy asks for it.
