@@ -88,11 +88,14 @@ func parseStopPolicy(s string) (snapshot.StopPolicy, error) {
 	}
 }
 
+// printWarnings writes to stdout, deliberately. Warnings are part of the report
+// about what was snapshotted; on stderr they interleave with the report they
+// belong to and end up appearing under the wrong container.
 func printWarnings(cmd *cobra.Command, warnings []string) {
 	if len(warnings) == 0 {
 		return
 	}
-	out := cmd.ErrOrStderr()
+	out := cmd.OutOrStdout()
 	for _, w := range warnings {
 		fmt.Fprintf(out, "  warning: %s\n", w)
 	}
