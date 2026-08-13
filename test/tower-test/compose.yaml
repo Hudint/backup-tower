@@ -1,0 +1,50 @@
+# Throwaway stack for developing and verifying backup-tower.
+#
+# It deliberately covers the shapes that behave differently: a named volume with
+# a database in it, a bind-mounted host directory, a container with no storage at
+# all, and both a service with a HEALTHCHECK and one without. Nothing here
+# publishes a port, so it cannot collide with anything already running.
+name: tower-test
+
+services:
+  # Named volume, has a healthcheck, writes real database files.
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_PASSWORD: tower-test
+      POSTGRES_DB: towertest
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d towertest"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # Bind mount from the host, no healthcheck.
+  files:
+    image: alpine:3
+    command: ["sh", "-c", "sleep infinity"]
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+
+  # Named volume plus a bind mount, to exercise both in one container.
+  mixed:
+    image: alpine:3
+    command: ["sh", "-c", "sleep infinity"]
+    volumes:
+      - mixed-data:/var/lib/mixed
+      - ./data:/data:ro
+    restart: unless-stopped
+
+  # No storage at all: the snapshot should still capture the configuration.
+  plain:
+    image: alpine:3
+    command: ["sh", "-c", "sleep infinity"]
+    restart: unless-stopped
+
+volumes:
+  db-data:
+  mixed-data:

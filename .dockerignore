@@ -1,0 +1,6 @@
+.git
+.gitignore
+test/tower-test/data
+*.md
+Dockerfile
+.dockerignore

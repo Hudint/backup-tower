@@ -1,0 +1,6 @@
+/backup-tower
+/dist/
+/backups/
+
+# Bind-mount fixture for the throwaway test stack; recreated by the stack itself.
+/test/tower-test/data/
