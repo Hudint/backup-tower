@@ -18,8 +18,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/hudint/backup-tower/internal/runtime"
-	"github.com/hudint/backup-tower/internal/snapshot/archive"
+	"github.com/Hudint/backup-tower/internal/runtime"
+	"github.com/Hudint/backup-tower/internal/snapshot/archive"
 )
 
 // Method records how a mount's data was reached.

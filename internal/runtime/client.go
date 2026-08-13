@@ -9,7 +9,7 @@ import (
 
 	"github.com/moby/moby/client"
 
-	"github.com/hudint/backup-tower/internal/version"
+	"github.com/Hudint/backup-tower/internal/version"
 )
 
 // Flavor identifies which engine we are talking to. Some behaviour differs

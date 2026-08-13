@@ -7,10 +7,10 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/hudint/backup-tower/internal/runtime"
-	"github.com/hudint/backup-tower/internal/snapshot/archive"
-	"github.com/hudint/backup-tower/internal/snapshot/source"
-	"github.com/hudint/backup-tower/internal/snapshot/store"
+	"github.com/Hudint/backup-tower/internal/runtime"
+	"github.com/Hudint/backup-tower/internal/snapshot/archive"
+	"github.com/Hudint/backup-tower/internal/snapshot/source"
+	"github.com/Hudint/backup-tower/internal/snapshot/store"
 )
 
 // StopPolicy decides whether the container is stopped while its data is read.

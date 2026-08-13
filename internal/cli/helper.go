@@ -6,8 +6,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/hudint/backup-tower/internal/snapshot/archive"
-	"github.com/hudint/backup-tower/internal/snapshot/source"
+	"github.com/Hudint/backup-tower/internal/snapshot/archive"
+	"github.com/Hudint/backup-tower/internal/snapshot/source"
 )
 
 // newHelperCmd is the entry point used inside short-lived helper containers.

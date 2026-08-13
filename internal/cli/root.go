@@ -12,7 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/hudint/backup-tower/internal/version"
+	"github.com/Hudint/backup-tower/internal/version"
 )
 
 // Run executes the command tree and returns a process exit code.

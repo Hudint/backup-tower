@@ -15,7 +15,7 @@ COPY . .
 ARG VERSION=dev
 RUN CGO_ENABLED=0 go build \
     -trimpath \
-    -ldflags "-s -w -X github.com/hudint/backup-tower/internal/version.Version=${VERSION}" \
+    -ldflags "-s -w -X github.com/Hudint/backup-tower/internal/version.Version=${VERSION}" \
     -o /out/backup-tower ./cmd/backup-tower
 
 FROM docker:cli

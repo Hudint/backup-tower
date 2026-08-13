@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/hudint/backup-tower/internal/snapshot/store"
+	"github.com/Hudint/backup-tower/internal/snapshot/store"
 )
 
 // LoadManifest reads and parses the manifest of one snapshot.

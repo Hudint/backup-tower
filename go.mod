@@ -1,4 +1,4 @@
-module github.com/hudint/backup-tower
+module github.com/Hudint/backup-tower
 
 go 1.24.0
 

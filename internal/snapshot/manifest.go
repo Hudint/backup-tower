@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hudint/backup-tower/internal/snapshot/archive"
+	"github.com/Hudint/backup-tower/internal/snapshot/archive"
 )
 
 // SchemaVersion is bumped whenever the on-disk layout changes in a way that a

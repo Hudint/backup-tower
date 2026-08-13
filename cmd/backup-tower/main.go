@@ -5,7 +5,7 @@ package main
 import (
 	"os"
 
-	"github.com/hudint/backup-tower/internal/cli"
+	"github.com/Hudint/backup-tower/internal/cli"
 )
 
 func main() {

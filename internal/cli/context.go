@@ -6,9 +6,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/hudint/backup-tower/internal/config"
-	"github.com/hudint/backup-tower/internal/runtime"
-	"github.com/hudint/backup-tower/internal/snapshot/store"
+	"github.com/Hudint/backup-tower/internal/config"
+	"github.com/Hudint/backup-tower/internal/runtime"
+	"github.com/Hudint/backup-tower/internal/snapshot/store"
 )
 
 // env bundles what most commands need: settings, a store and, when the command

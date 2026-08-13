@@ -5,8 +5,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/hudint/backup-tower/internal/runtime"
-	"github.com/hudint/backup-tower/internal/version"
+	"github.com/Hudint/backup-tower/internal/runtime"
+	"github.com/Hudint/backup-tower/internal/version"
 )
 
 // newInfoCmd reports what backup-tower sees. It is the first thing to run when

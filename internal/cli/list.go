@@ -7,8 +7,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/hudint/backup-tower/internal/snapshot"
-	"github.com/hudint/backup-tower/internal/version"
+	"github.com/Hudint/backup-tower/internal/snapshot"
+	"github.com/Hudint/backup-tower/internal/version"
 )
 
 func newListCmd() *cobra.Command {

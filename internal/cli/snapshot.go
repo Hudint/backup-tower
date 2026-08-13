@@ -5,8 +5,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/hudint/backup-tower/internal/snapshot"
-	"github.com/hudint/backup-tower/internal/snapshot/source"
+	"github.com/Hudint/backup-tower/internal/snapshot"
+	"github.com/Hudint/backup-tower/internal/snapshot/source"
 )
 
 func newSnapshotCmd() *cobra.Command {
