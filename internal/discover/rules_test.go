@@ -188,3 +188,42 @@ func writeRules(t *testing.T, content string) string {
 	}
 	return path
 }
+
+func TestKomodoTagsMapToSettings(t *testing.T) {
+	// A tag is only a name. Mapping tags to settings is what lets the whole
+	// policy live in Komodo, with no compose file to edit and no redeploy.
+	path := writeRules(t, `
+komodo_tags:
+  - tag: bt-update
+    set:
+      enable: true
+      monitor_only: false
+  - tag: bt-stop
+    set:
+      stop: always
+`)
+	f, err := LoadRuleFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.KomodoTags) != 2 {
+		t.Fatalf("parsed %d tag rules, want 2", len(f.KomodoTags))
+	}
+	if f.KomodoTags[0].Tag != "bt-update" || f.KomodoTags[1].Tag != "bt-stop" {
+		t.Errorf("tag order lost: %+v", f.KomodoTags)
+	}
+	if f.KomodoTags[0].Set.Enable == nil || !*f.KomodoTags[0].Set.Enable {
+		t.Error("enable was not parsed")
+	}
+}
+
+func TestKomodoTagRulesAreValidated(t *testing.T) {
+	// A tag rule that never applies because of a typo would do nothing and say
+	// nothing, which is the worst way to find out.
+	if _, err := LoadRuleFile(writeRules(t, "komodo_tags:\n  - tag: \"\"\n    set: {}\n")); err == nil {
+		t.Error("an empty tag name was accepted")
+	}
+	if _, err := LoadRuleFile(writeRules(t, "komodo_tags:\n  - tag: x\n    set:\n      stop: sometimes\n")); err == nil {
+		t.Error("an invalid stop policy was accepted inside a tag rule")
+	}
+}

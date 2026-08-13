@@ -297,6 +297,23 @@ tagged deployments through their container name. Komodo manages several hosts
 while backup-tower only sees its own, so set `KOMODO_SERVER` when a tag spans
 more than one — without it you get a warning rather than a guess.
 
+**Tags can carry the whole policy, not just membership.** Map tag names to
+settings in the rule file and a stack is configured by tagging it in the Komodo
+UI — no compose file to edit, no redeploy to schedule:
+
+```yaml
+komodo_tags:
+  - tag: bt-update
+    set: {enable: true, monitor_only: false, retention_keep: 5}
+  - tag: bt-snapshot-stop
+    set: {stop: always}
+  - tag: bt-rollback
+    set: {rollback: true}
+```
+
+`KOMODO_TAG` remains the simple case and sets nothing but `enable`. It marks
+membership, so it must not override a deliberate watch-only rule elsewhere.
+
 ### Registry credentials
 
 Private images need credentials for the digest check and the pull. Two sources

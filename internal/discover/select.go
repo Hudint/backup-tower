@@ -65,12 +65,13 @@ func (c *Candidate) SkipReason() string {
 
 // Selector produces candidates.
 type Selector struct {
-	rt      *runtime.Client
-	rules   *RuleFile
-	komodo  *KomodoSelection
-	keep    int
-	days    int
-	noNotes bool
+	rt       *runtime.Client
+	rules    *RuleFile
+	komodo   *KomodoSelection
+	tagRules []TagRule
+	keep     int
+	days     int
+	noNotes  bool
 }
 
 // SelectorOptions configures a Selector.
@@ -78,6 +79,9 @@ type SelectorOptions struct {
 	Rules *RuleFile
 	// Komodo is the selection contributed by Komodo, nil when not configured.
 	Komodo *KomodoSelection
+	// ExtraTagRules are applied before the rule file's, and carry the simple
+	// KOMODO_TAG case.
+	ExtraTagRules []TagRule
 	// RetentionKeep and RetentionDays seed the defaults.
 	RetentionKeep int
 	RetentionDays int
@@ -92,12 +96,13 @@ func NewSelector(rt *runtime.Client, opts SelectorOptions) *Selector {
 		rules = &RuleFile{}
 	}
 	return &Selector{
-		rt:      rt,
-		rules:   rules,
-		komodo:  opts.Komodo,
-		keep:    opts.RetentionKeep,
-		days:    opts.RetentionDays,
-		noNotes: opts.NoNotes,
+		rt:       rt,
+		rules:    rules,
+		komodo:   opts.Komodo,
+		tagRules: append(opts.ExtraTagRules, rules.KomodoTags...),
+		keep:     opts.RetentionKeep,
+		days:     opts.RetentionDays,
+		noNotes:  opts.NoNotes,
 	}
 }
 
@@ -145,17 +150,7 @@ func (s *Selector) evaluate(ctx context.Context, c *runtime.Container) *Candidat
 		}
 	}
 
-	if s.komodo != nil {
-		if _, ok := s.komodo.Projects[c.ComposeProject()]; ok && c.ComposeProject() != "" {
-			policy.Enabled = true
-			d.EnabledBy = &Origin{Source: "komodo", Detail: "stack " + c.ComposeProject()}
-			d.record("komodo", "stack "+c.ComposeProject())
-		} else if name, ok := s.komodo.Containers[c.Name]; ok {
-			policy.Enabled = true
-			d.EnabledBy = &Origin{Source: "komodo", Detail: "deployment " + name}
-			d.record("komodo", "deployment "+name)
-		}
-	}
+	s.applyKomodoTags(&policy, c, d)
 
 	applyLabels(&policy, c.Labels, d)
 
@@ -168,6 +163,47 @@ func (s *Selector) evaluate(ctx context.Context, c *runtime.Container) *Candidat
 		addNotes(cand)
 	}
 	return cand
+}
+
+// applyKomodoTags turns the Komodo tags a resource carries into settings.
+//
+// Tags are the way to configure a stack without touching its compose file: tag
+// it in the Komodo UI and it is configured, with no commit to make and no
+// redeploy to schedule.
+func (s *Selector) applyKomodoTags(policy *Policy, c *runtime.Container, d *Decision) {
+	if s.komodo == nil {
+		return
+	}
+
+	var tags []string
+	var what string
+	if p := c.ComposeProject(); p != "" {
+		if t, ok := s.komodo.Projects[p]; ok {
+			tags, what = t, "stack "+p
+		}
+	}
+	if tags == nil {
+		if t, ok := s.komodo.Containers[c.Name]; ok {
+			tags, what = t, "deployment "+c.Name
+		}
+	}
+	if len(tags) == 0 {
+		return
+	}
+
+	has := make(map[string]bool, len(tags))
+	for _, t := range tags {
+		has[t] = true
+	}
+
+	// The rules are applied in the order they are written, so a later tag can
+	// refine an earlier one — the same way the rule list works.
+	for _, tr := range s.tagRules {
+		if !has[tr.Tag] {
+			continue
+		}
+		applySettings(policy, tr.Set, "komodo tag", fmt.Sprintf("%s on %s", tr.Tag, what), d)
+	}
 }
 
 // updatability asks whether a registry could answer a question about this image.

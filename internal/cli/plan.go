@@ -108,6 +108,7 @@ func buildSelector(ctx context.Context, cfg config.Config, rt *runtime.Client, n
 	}
 
 	var komodo *discover.KomodoSelection
+	var extraTagRules []discover.TagRule
 	switch {
 	case cfg.Komodo.Configured():
 		client := discover.NewKomodoClient(discover.KomodoConfig{
@@ -117,15 +118,29 @@ func buildSelector(ctx context.Context, cfg config.Config, rt *runtime.Client, n
 			Tag:       cfg.Komodo.Tag,
 			Server:    cfg.Komodo.Server,
 		})
-		sel, err := client.Tagged(ctx)
+		sel, err := client.TaggedResources(ctx)
 		if err != nil {
 			return nil, nil, fmt.Errorf("komodo: %w", err)
 		}
 		komodo = sel
-		notes = append(notes, fmt.Sprintf("komodo: tag %q selected %d stacks and %d deployments",
-			cfg.Komodo.Tag, len(sel.Projects), len(sel.Containers)))
+		notes = append(notes, fmt.Sprintf("komodo: %d tagged stacks and %d tagged deployments on this server",
+			len(sel.Projects), len(sel.Containers)))
 		for _, w := range sel.Warnings {
 			notes = append(notes, "komodo: "+w)
+		}
+		// KOMODO_TAG is the simple case, expressed as a tag rule so there is
+		// only one mechanism to reason about.
+		//
+		// It sets nothing but Enable. Setting monitor_only here too would make
+		// this tag override a deliberate watch-only rule elsewhere and quietly
+		// widen what gets updated — which is precisely what it did before this
+		// was noticed.
+		if cfg.Komodo.Tag != "" {
+			enable := true
+			extraTagRules = append(extraTagRules, discover.TagRule{
+				Tag: cfg.Komodo.Tag,
+				Set: discover.Settings{Enable: &enable},
+			})
 		}
 	case cfg.Komodo.Partial():
 		notes = append(notes, fmt.Sprintf("komodo: not queried, still missing %s",
@@ -135,6 +150,7 @@ func buildSelector(ctx context.Context, cfg config.Config, rt *runtime.Client, n
 	return discover.NewSelector(rt, discover.SelectorOptions{
 		Rules:         rules,
 		Komodo:        komodo,
+		ExtraTagRules: extraTagRules,
 		RetentionKeep: cfg.RetentionKeep,
 		RetentionDays: cfg.RetentionDays,
 		NoNotes:       noNotes,

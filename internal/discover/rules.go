@@ -23,6 +23,9 @@ type RuleFile struct {
 	// Rules are applied in order; later matches override earlier ones. That
 	// makes the natural way to write them broad-first, specific-last.
 	Rules []Rule `yaml:"rules"`
+	// KomodoTags map Komodo tag names to settings, so a stack can be configured
+	// by tagging it in the Komodo UI rather than by editing its compose file.
+	KomodoTags []TagRule `yaml:"komodo_tags,omitempty"`
 }
 
 // Rule is one conditional block of settings.
@@ -110,6 +113,14 @@ func (f *RuleFile) compile() error {
 		}
 		if err := validateSettings(r.Set); err != nil {
 			return fmt.Errorf("%s: %w", r.label(i), err)
+		}
+	}
+	for i, tr := range f.KomodoTags {
+		if tr.Tag == "" {
+			return fmt.Errorf("komodo_tags[%d]: tag must not be empty", i)
+		}
+		if err := validateSettings(tr.Set); err != nil {
+			return fmt.Errorf("komodo_tags[%d] (%s): %w", i, tr.Tag, err)
 		}
 	}
 	return validateSettings(f.Defaults)

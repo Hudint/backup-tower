@@ -10,112 +10,139 @@ import (
 	"testing"
 )
 
+// komodoStub answers the three read requests TaggedResources makes.
+func komodoStub(t *testing.T, tags, stacks, deployments string) (*httptest.Server, *[]string) {
+	t.Helper()
+	var asked []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		name := strings.TrimPrefix(r.URL.Path, "/read/")
+		asked = append(asked, name)
+		w.Header().Set("content-type", "application/json")
+		switch name {
+		case "ListTags":
+			io.WriteString(w, tags)
+		case "ListStacks":
+			io.WriteString(w, stacks)
+		case "ListDeployments":
+			io.WriteString(w, deployments)
+		default:
+			io.WriteString(w, `[]`)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &asked
+}
+
+const stubTags = `[
+  {"_id":{"$oid":"t1"},"name":"bt-update"},
+  {"_id":{"$oid":"t2"},"name":"bt-stop"},
+  {"_id":{"$oid":"t3"},"name":"unrelated"}
+]`
+
 func TestKomodoSendsTheDocumentedRequest(t *testing.T) {
 	var seen []struct {
 		path   string
 		key    string
 		secret string
-		body   map[string]any
 	}
-
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		var parsed map[string]any
-		_ = json.Unmarshal(body, &parsed)
 		seen = append(seen, struct {
 			path   string
 			key    string
 			secret string
-			body   map[string]any
-		}{r.URL.Path, r.Header.Get("x-api-key"), r.Header.Get("x-api-secret"), parsed})
-
+		}{r.URL.Path, r.Header.Get("x-api-key"), r.Header.Get("x-api-secret")})
 		w.Header().Set("content-type", "application/json")
 		io.WriteString(w, `[]`)
 	}))
 	defer srv.Close()
 
-	c := NewKomodoClient(KomodoConfig{
-		URL: srv.URL, APIKey: "key", APISecret: "secret", Tag: "auto-update",
-	})
-	if _, err := c.Tagged(context.Background()); err != nil {
-		t.Fatalf("Tagged: %v", err)
+	c := NewKomodoClient(KomodoConfig{URL: srv.URL, APIKey: "key", APISecret: "secret"})
+	if _, err := c.TaggedResources(context.Background()); err != nil {
+		t.Fatalf("TaggedResources: %v", err)
 	}
 
-	if len(seen) != 2 {
-		t.Fatalf("made %d requests, want 2 (stacks and deployments)", len(seen))
-	}
 	// The request type belongs in the path, not the body.
-	if seen[0].path != "/read/ListStacks" {
-		t.Errorf("first request path = %q, want /read/ListStacks", seen[0].path)
+	want := []string{"/read/ListTags", "/read/ListStacks", "/read/ListDeployments"}
+	if len(seen) != len(want) {
+		t.Fatalf("made %d requests, want %d", len(seen), len(want))
 	}
-	if seen[1].path != "/read/ListDeployments" {
-		t.Errorf("second request path = %q, want /read/ListDeployments", seen[1].path)
+	for i, w := range want {
+		if seen[i].path != w {
+			t.Errorf("request %d path = %q, want %q", i, seen[i].path, w)
+		}
 	}
 	if seen[0].key != "key" || seen[0].secret != "secret" {
 		t.Error("api key headers were not sent")
 	}
+}
 
-	query, ok := seen[0].body["query"].(map[string]any)
-	if !ok {
-		t.Fatalf("body has no query object: %v", seen[0].body)
+func TestTagsAreResolvedToNames(t *testing.T) {
+	// Resources reference tags by id; a policy is written against names.
+	srv, _ := komodoStub(t, stubTags,
+		`[{"id":"1","type":"Stack","name":"the-list","tags":["t1","t2"],"info":{"server_name":"prod-01"}}]`,
+		`[{"id":"2","type":"Deployment","name":"ntfy","tags":["t1"],"info":{"server_name":"prod-01","custom_name":"ntfy-prod"}}]`)
+
+	c := NewKomodoClient(KomodoConfig{URL: srv.URL, APIKey: "k", APISecret: "s"})
+	sel, err := c.TaggedResources(context.Background())
+	if err != nil {
+		t.Fatal(err)
 	}
-	tags, _ := query["tags"].([]any)
-	if len(tags) != 1 || tags[0] != "auto-update" {
-		t.Errorf("query tags = %v, want [auto-update]", tags)
+
+	got := sel.Projects["the-list"]
+	if len(got) != 2 || got[0] != "bt-stop" || got[1] != "bt-update" {
+		t.Errorf("stack tags = %v, want [bt-stop bt-update]", got)
 	}
-	if query["tag_behavior"] != "Any" {
-		t.Errorf("tag_behavior = %v, want Any", query["tag_behavior"])
+	// A deployment's container name can differ from the deployment name.
+	if got := sel.Containers["ntfy-prod"]; len(got) != 1 || got[0] != "bt-update" {
+		t.Errorf("deployment tags = %v, want [bt-update]", got)
 	}
 }
 
-func TestKomodoResolvesStacksAndDeployments(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("content-type", "application/json")
-		switch {
-		case strings.HasSuffix(r.URL.Path, "ListStacks"):
-			io.WriteString(w, `[
-			  {"id":"1","type":"Stack","name":"vikunja","tags":["t"],"info":{"server_id":"s1","server_name":"prod-01"}},
-			  {"id":"2","type":"Stack","name":"gitea","tags":["t"],"info":{"server_id":"s2","server_name":"prod-02"}}
-			]`)
-		default:
-			io.WriteString(w, `[
-			  {"id":"3","type":"Deployment","name":"ntfy","tags":["t"],"info":{"server_id":"s1","server_name":"prod-01","custom_name":"ntfy-prod"}}
-			]`)
-		}
-	}))
-	defer srv.Close()
+func TestUntaggedResourcesAreIgnored(t *testing.T) {
+	srv, _ := komodoStub(t, stubTags,
+		`[{"id":"1","type":"Stack","name":"plain","tags":[],"info":{"server_name":"prod-01"}}]`, `[]`)
 
-	t.Run("without a server filter it warns about the ambiguity", func(t *testing.T) {
-		c := NewKomodoClient(KomodoConfig{URL: srv.URL, APIKey: "k", APISecret: "s", Tag: "t"})
-		sel, err := c.Tagged(context.Background())
+	c := NewKomodoClient(KomodoConfig{URL: srv.URL, APIKey: "k", APISecret: "s"})
+	sel, err := c.TaggedResources(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sel.Projects) != 0 {
+		t.Errorf("an untagged stack was included: %v", sel.Projects)
+	}
+}
+
+func TestServerFilterAndAmbiguityWarning(t *testing.T) {
+	stacks := `[
+	  {"id":"1","type":"Stack","name":"here","tags":["t1"],"info":{"server_id":"s1","server_name":"prod-01"}},
+	  {"id":"2","type":"Stack","name":"elsewhere","tags":["t1"],"info":{"server_id":"s2","server_name":"prod-02"}}
+	]`
+
+	t.Run("without a filter it warns rather than guesses", func(t *testing.T) {
+		srv, _ := komodoStub(t, stubTags, stacks, `[]`)
+		c := NewKomodoClient(KomodoConfig{URL: srv.URL, APIKey: "k", APISecret: "s"})
+		sel, err := c.TaggedResources(context.Background())
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(sel.Projects) != 2 {
-			t.Errorf("projects = %v, want both stacks", sel.Projects)
-		}
-		// Acting on a stack that lives on another host is at best a no-op, so
-		// the ambiguity has to be said out loud.
+		// Acting on a stack that lives on another host is at best a no-op.
 		if len(sel.Warnings) == 0 {
-			t.Error("no warning although the tag spans two servers")
+			t.Error("no warning although tagged resources span two servers")
 		}
 	})
 
-	t.Run("with a server filter only that host's resources are selected", func(t *testing.T) {
-		c := NewKomodoClient(KomodoConfig{URL: srv.URL, APIKey: "k", APISecret: "s", Tag: "t", Server: "prod-01"})
-		sel, err := c.Tagged(context.Background())
+	t.Run("with a filter only this host's resources are kept", func(t *testing.T) {
+		srv, _ := komodoStub(t, stubTags, stacks, `[]`)
+		c := NewKomodoClient(KomodoConfig{URL: srv.URL, APIKey: "k", APISecret: "s", Server: "prod-01"})
+		sel, err := c.TaggedResources(context.Background())
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, ok := sel.Projects["vikunja"]; !ok {
-			t.Error("the stack on this server was not selected")
+		if _, ok := sel.Projects["here"]; !ok {
+			t.Error("the stack on this server was dropped")
 		}
-		if _, ok := sel.Projects["gitea"]; ok {
-			t.Error("a stack from another server was selected")
-		}
-		// A deployment's container name can differ from the deployment name.
-		if _, ok := sel.Containers["ntfy-prod"]; !ok {
-			t.Errorf("deployment was not resolved to its container name: %v", sel.Containers)
+		if _, ok := sel.Projects["elsewhere"]; ok {
+			t.Error("a stack from another server was included")
 		}
 	})
 }
@@ -127,8 +154,8 @@ func TestKomodoReportsServerErrorsWithContext(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewKomodoClient(KomodoConfig{URL: srv.URL, APIKey: "wrong", APISecret: "s", Tag: "t"})
-	_, err := c.Tagged(context.Background())
+	c := NewKomodoClient(KomodoConfig{URL: srv.URL, APIKey: "wrong", APISecret: "s"})
+	_, err := c.TaggedResources(context.Background())
 	if err == nil {
 		t.Fatal("an unauthorised response was not reported as an error")
 	}
@@ -157,7 +184,7 @@ func TestRegistryAccountsFallBackToTheOlderRequestName(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewKomodoClient(KomodoConfig{URL: srv.URL, APIKey: "k", APISecret: "s", Tag: "t"})
+	c := NewKomodoClient(KomodoConfig{URL: srv.URL, APIKey: "k", APISecret: "s"})
 	accounts, err := c.RegistryAccounts(context.Background())
 	if err != nil {
 		t.Fatalf("RegistryAccounts: %v", err)
@@ -181,11 +208,25 @@ func TestUnrelatedErrorsAreNotRetried(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewKomodoClient(KomodoConfig{URL: srv.URL, APIKey: "k", APISecret: "s", Tag: "t"})
+	c := NewKomodoClient(KomodoConfig{URL: srv.URL, APIKey: "k", APISecret: "s"})
 	if _, err := c.RegistryAccounts(context.Background()); err == nil {
 		t.Fatal("an authentication failure was not reported")
 	}
 	if calls != 1 {
 		t.Errorf("made %d calls, want 1 — an auth failure is not a reason to try another name", calls)
+	}
+}
+
+func TestMongoIDHandlesBothForms(t *testing.T) {
+	var wrapped any
+	json.Unmarshal([]byte(`{"$oid":"abc123"}`), &wrapped)
+	if got := mongoID(wrapped); got != "abc123" {
+		t.Errorf("mongoID(wrapped) = %q", got)
+	}
+	if got := mongoID("plain"); got != "plain" {
+		t.Errorf("mongoID(plain) = %q", got)
+	}
+	if got := mongoID(42); got != "" {
+		t.Errorf("mongoID(unexpected) = %q, want empty", got)
 	}
 }
