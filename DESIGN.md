@@ -143,12 +143,22 @@ A misspelled `tower.*` label is reported as a problem rather than ignored. A typ
 in the label that was meant to enable or protect a container otherwise does
 nothing and says nothing, which is the worst way to find out.
 
-Komodo is used as a selection source only; updates still go through the normal
-path. That keeps the coupling to a handful of read calls rather than tying
-backup-tower to Komodo's API version and its idea of when a deployment is
-finished. Its request names are tried under both their pre- and post-2.3.0
-spellings, because pinning either one means silently losing credentials on one
-side of that boundary.
+Selection reads nothing but the containers and a file on disk. Komodo was once a
+second source — tag a stack in its UI and it was configured, with no compose file
+to edit — and that convenience cost more than it was worth: deciding anything
+required an external service to answer, so an unreachable Komodo stopped every
+scheduled backup on the host, including for containers configured entirely by
+label. A backup that does not happen because a *selection source* is down is the
+wrong failure to accept, and the fix was to remove the dependency rather than to
+tolerate it.
+
+What Komodo is still needed for is credentials: images belonging to its stacks
+are pulled by its periphery agent, which logs in inside its own container, so
+those secrets never reach this host. It is asked for them only after a registry
+has actually refused what the host already has — a machine whose images are
+public, or covered by its own `docker login`, never contacts it. Its request
+names are tried under both their pre- and post-2.3.0 spellings, because pinning
+either one means silently losing credentials on one side of that boundary.
 
 ## Reporting
 

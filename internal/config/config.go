@@ -46,27 +46,27 @@ type Config struct {
 	Komodo KomodoSettings
 }
 
-// KomodoSettings configures Komodo as an additional selection source.
+// KomodoSettings configures Komodo as a source of registry credentials.
+//
+// It is not a selection source. Which containers backup-tower acts on is
+// decided from labels and the rule file alone, both of which can be read
+// without a network — an external service that has to be reachable before
+// anything can be decided is an external service that can stop your backups.
 type KomodoSettings struct {
 	URL       string
 	APIKey    string
 	APISecret string
-	// Tag marks the stacks and deployments that opt in.
-	Tag string
-	// Server restricts results to one Komodo server; empty auto-detects and
-	// warns when the tag spans several.
-	Server string
 }
 
 // Configured reports whether Komodo can be queried.
 func (k KomodoSettings) Configured() bool {
-	return k.URL != "" && k.APIKey != "" && k.APISecret != "" && k.Tag != ""
+	return k.URL != "" && k.APIKey != "" && k.APISecret != ""
 }
 
 // Partial reports whether Komodo was half-configured, which is almost always a
 // mistake worth pointing out rather than silently ignoring.
 func (k KomodoSettings) Partial() bool {
-	any := k.URL != "" || k.APIKey != "" || k.APISecret != "" || k.Tag != ""
+	any := k.URL != "" || k.APIKey != "" || k.APISecret != ""
 	return any && !k.Configured()
 }
 
@@ -80,7 +80,6 @@ func (k KomodoSettings) Missing() []string {
 		{"KOMODO_URL", k.URL},
 		{"KOMODO_API_KEY", k.APIKey},
 		{"KOMODO_API_SECRET", k.APISecret},
-		{"KOMODO_TAG", k.Tag},
 	} {
 		if f.value == "" {
 			out = append(out, f.env)
@@ -114,8 +113,6 @@ func FromEnv() (Config, error) {
 		URL:       os.Getenv("KOMODO_URL"),
 		APIKey:    os.Getenv("KOMODO_API_KEY"),
 		APISecret: os.Getenv("KOMODO_API_SECRET"),
-		Tag:       os.Getenv("KOMODO_TAG"),
-		Server:    os.Getenv("KOMODO_SERVER"),
 	}
 
 	var err error

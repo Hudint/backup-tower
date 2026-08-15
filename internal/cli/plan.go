@@ -28,7 +28,7 @@ func newPlanCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "plan",
 		Short: "Show which containers backup-tower would act on, and why",
-		Long: "Evaluates every container against the labels, the rule file and Komodo, and\n" +
+		Long: "Evaluates every container against its labels and the rule file, and\n" +
 			"prints the result without touching anything.\n\n" +
 			"Run this before enabling automatic updates. Automatic updates are opt-in, so\n" +
 			"a host with no labels set must show nothing selected — and if it does not,\n" +
@@ -91,10 +91,14 @@ func newPlanCmd() *cobra.Command {
 }
 
 // buildSelector assembles the selection sources and reports what it managed to
-// use. Komodo being unreachable must not silently reduce the selection: a
-// smaller plan that looks perfectly normal is how containers quietly stop being
-// updated.
-func buildSelector(ctx context.Context, cfg config.Config, rt *runtime.Client, noNotes bool) (*discover.Selector, []string, error) {
+// use.
+//
+// Both sources are local — labels come off the containers, rules off a file on
+// disk — so this cannot fail for reasons outside the host. That is deliberate.
+// Selection used to depend on Komodo as well, which meant an unreachable Komodo
+// stopped every scheduled backup on the machine, including for containers that
+// were configured entirely by label and needed nothing from it.
+func buildSelector(_ context.Context, cfg config.Config, rt *runtime.Client, noNotes bool) (*discover.Selector, []string, error) {
 	var notes []string
 
 	rules := &discover.RuleFile{}
@@ -107,50 +111,8 @@ func buildSelector(ctx context.Context, cfg config.Config, rt *runtime.Client, n
 		notes = append(notes, fmt.Sprintf("rules:  %s (%d rules)", cfg.RulesFile, len(rules.Rules)))
 	}
 
-	var komodo *discover.KomodoSelection
-	var extraTagRules []discover.TagRule
-	switch {
-	case cfg.Komodo.Configured():
-		client := discover.NewKomodoClient(discover.KomodoConfig{
-			URL:       cfg.Komodo.URL,
-			APIKey:    cfg.Komodo.APIKey,
-			APISecret: cfg.Komodo.APISecret,
-			Tag:       cfg.Komodo.Tag,
-			Server:    cfg.Komodo.Server,
-		})
-		sel, err := client.TaggedResources(ctx)
-		if err != nil {
-			return nil, nil, fmt.Errorf("komodo: %w", err)
-		}
-		komodo = sel
-		notes = append(notes, fmt.Sprintf("komodo: %d tagged stacks and %d tagged deployments on this server",
-			len(sel.Projects), len(sel.Containers)))
-		for _, w := range sel.Warnings {
-			notes = append(notes, "komodo: "+w)
-		}
-		// KOMODO_TAG is the simple case, expressed as a tag rule so there is
-		// only one mechanism to reason about.
-		//
-		// It sets nothing but Enable. Setting monitor_only here too would make
-		// this tag override a deliberate watch-only rule elsewhere and quietly
-		// widen what gets updated — which is precisely what it did before this
-		// was noticed.
-		if cfg.Komodo.Tag != "" {
-			enable := true
-			extraTagRules = append(extraTagRules, discover.TagRule{
-				Tag: cfg.Komodo.Tag,
-				Set: discover.Settings{Enable: &enable},
-			})
-		}
-	case cfg.Komodo.Partial():
-		notes = append(notes, fmt.Sprintf("komodo: not queried, still missing %s",
-			strings.Join(cfg.Komodo.Missing(), ", ")))
-	}
-
 	return discover.NewSelector(rt, discover.SelectorOptions{
 		Rules:         rules,
-		Komodo:        komodo,
-		ExtraTagRules: extraTagRules,
 		RetentionKeep: cfg.RetentionKeep,
 		RetentionDays: cfg.RetentionDays,
 		NoNotes:       noNotes,

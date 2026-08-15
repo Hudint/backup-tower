@@ -54,6 +54,27 @@ func (c *Client) InspectImage(ctx context.Context, ref string) (*Image, error) {
 	}, nil
 }
 
+// ListImages returns every local image keyed by its ID.
+//
+// The selection engine asks one question of every container's image — does it
+// carry a registry digest — and answering it with an inspect per container is
+// one API call per container, every pass. One listing answers it for all of them.
+func (c *Client) ListImages(ctx context.Context) (map[string]*Image, error) {
+	res, err := c.api.ImageList(ctx, client.ImageListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("list images: %w", err)
+	}
+	out := make(map[string]*Image, len(res.Items))
+	for _, img := range res.Items {
+		out[img.ID] = &Image{
+			ID:          img.ID,
+			RepoTags:    img.RepoTags,
+			RepoDigests: img.RepoDigests,
+		}
+	}
+	return out, nil
+}
+
 // PullImage fetches an image reference, waiting for the transfer to finish.
 //
 // The engine streams progress as JSON and only reports failures inside that

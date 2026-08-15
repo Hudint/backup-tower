@@ -65,23 +65,16 @@ func (c *Candidate) SkipReason() string {
 
 // Selector produces candidates.
 type Selector struct {
-	rt       *runtime.Client
-	rules    *RuleFile
-	komodo   *KomodoSelection
-	tagRules []TagRule
-	keep     int
-	days     int
-	noNotes  bool
+	rt      *runtime.Client
+	rules   *RuleFile
+	keep    int
+	days    int
+	noNotes bool
 }
 
 // SelectorOptions configures a Selector.
 type SelectorOptions struct {
 	Rules *RuleFile
-	// Komodo is the selection contributed by Komodo, nil when not configured.
-	Komodo *KomodoSelection
-	// ExtraTagRules are applied before the rule file's, and carry the simple
-	// KOMODO_TAG case.
-	ExtraTagRules []TagRule
 	// RetentionKeep and RetentionDays seed the defaults.
 	RetentionKeep int
 	RetentionDays int
@@ -96,26 +89,36 @@ func NewSelector(rt *runtime.Client, opts SelectorOptions) *Selector {
 		rules = &RuleFile{}
 	}
 	return &Selector{
-		rt:       rt,
-		rules:    rules,
-		komodo:   opts.Komodo,
-		tagRules: append(opts.ExtraTagRules, rules.KomodoTags...),
-		keep:     opts.RetentionKeep,
-		days:     opts.RetentionDays,
-		noNotes:  opts.NoNotes,
+		rt:      rt,
+		rules:   rules,
+		keep:    opts.RetentionKeep,
+		days:    opts.RetentionDays,
+		noNotes: opts.NoNotes,
 	}
 }
 
 // Select evaluates every container on the host.
+//
+// This is two API calls regardless of how many containers there are — one
+// listing for the containers, one for the images — because the daemon runs it
+// once a minute and a per-container round trip is paid for every one of them.
 func (s *Selector) Select(ctx context.Context, includeStopped bool) ([]*Candidate, error) {
 	containers, err := s.rt.List(ctx, includeStopped)
 	if err != nil {
 		return nil, err
 	}
 
+	// A failed image listing is not fatal: it only costs the ability to tell a
+	// locally built image from a pulled one, and updatability falls back to
+	// assuming the reference is pullable, which the check itself will settle.
+	images, err := s.rt.ListImages(ctx)
+	if err != nil {
+		images = nil
+	}
+
 	out := make([]*Candidate, 0, len(containers))
 	for _, c := range containers {
-		out = append(out, s.evaluate(ctx, c))
+		out = append(out, s.evaluate(c, images))
 	}
 	sort.Slice(out, func(i, j int) bool {
 		return out[i].Container.Name < out[j].Container.Name
@@ -129,13 +132,21 @@ func (s *Selector) SelectOne(ctx context.Context, ref string) (*Candidate, error
 	if err != nil {
 		return nil, err
 	}
-	return s.evaluate(ctx, c), nil
+	images, err := s.rt.ListImages(ctx)
+	if err != nil {
+		images = nil
+	}
+	return s.evaluate(c, images), nil
 }
 
 // evaluate resolves the policy for one container, in precedence order:
-// defaults, then the rule file, then Komodo, then labels. Labels come last
-// because they sit on the object itself.
-func (s *Selector) evaluate(ctx context.Context, c *runtime.Container) *Candidate {
+// defaults, then the rule file, then labels. Labels come last and therefore
+// win, because they sit on the object being acted upon and are the most
+// specific statement of intent available.
+//
+// Both layers can express every setting. The rule file is for containers whose
+// compose file is not yours to edit; a label is for when it is.
+func (s *Selector) evaluate(c *runtime.Container, images map[string]*runtime.Image) *Candidate {
 	cand := &Candidate{Container: c}
 	d := &cand.Decision
 	policy := Defaults(s.keep, s.days)
@@ -150,12 +161,10 @@ func (s *Selector) evaluate(ctx context.Context, c *runtime.Container) *Candidat
 		}
 	}
 
-	s.applyKomodoTags(&policy, c, d)
-
 	applyLabels(&policy, c.Labels, d)
 
 	cand.Decision.Policy = policy
-	cand.Updatability = s.updatability(ctx, c)
+	cand.Updatability = updatability(c, images)
 	cand.ComposeFile = composeFile(c)
 	cand.Strategy = resolveStrategy(policy.Strategy, cand.ComposeFile)
 
@@ -165,57 +174,18 @@ func (s *Selector) evaluate(ctx context.Context, c *runtime.Container) *Candidat
 	return cand
 }
 
-// applyKomodoTags turns the Komodo tags a resource carries into settings.
-//
-// Tags are the way to configure a stack without touching its compose file: tag
-// it in the Komodo UI and it is configured, with no commit to make and no
-// redeploy to schedule.
-func (s *Selector) applyKomodoTags(policy *Policy, c *runtime.Container, d *Decision) {
-	if s.komodo == nil {
-		return
-	}
-
-	var tags []string
-	var what string
-	if p := c.ComposeProject(); p != "" {
-		if t, ok := s.komodo.Projects[p]; ok {
-			tags, what = t, "stack "+p
-		}
-	}
-	if tags == nil {
-		if t, ok := s.komodo.Containers[c.Name]; ok {
-			tags, what = t, "deployment "+c.Name
-		}
-	}
-	if len(tags) == 0 {
-		return
-	}
-
-	has := make(map[string]bool, len(tags))
-	for _, t := range tags {
-		has[t] = true
-	}
-
-	// The rules are applied in the order they are written, so a later tag can
-	// refine an earlier one — the same way the rule list works.
-	for _, tr := range s.tagRules {
-		if !has[tr.Tag] {
-			continue
-		}
-		applySettings(policy, tr.Set, "komodo tag", fmt.Sprintf("%s on %s", tr.Tag, what), d)
-	}
-}
-
 // updatability asks whether a registry could answer a question about this image.
-func (s *Selector) updatability(ctx context.Context, c *runtime.Container) Updatability {
+func updatability(c *runtime.Container, images map[string]*runtime.Image) Updatability {
 	// A container whose configured image is a bare hex ID has nothing to
 	// resolve: the tag it was built from is long gone.
 	if c.Image == "" || looksLikeImageID(c.Image) {
 		return UnnamedImage
 	}
-	img, err := s.rt.InspectImage(ctx, c.ImageID)
-	if err != nil {
-		// The image is gone locally; the reference may still be pullable.
+	img, ok := images[c.ImageID]
+	if !ok {
+		// The image is not in the listing — gone locally, or the listing failed.
+		// Either way the reference may still be pullable, and the update check
+		// itself will find out.
 		return Updatable
 	}
 	if !img.FromRegistry() {

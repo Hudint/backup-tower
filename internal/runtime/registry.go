@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/distribution/reference"
 	"github.com/moby/moby/api/types/registry"
@@ -37,6 +38,79 @@ type RegistryAuth struct {
 	// emptyTokens records sources that named a registry but supplied no secret,
 	// which is what a redacted API response looks like.
 	emptyTokens map[string]string
+
+	// fallback is consulted only after a registry has refused everything
+	// already known. See SetFallback.
+	fallback     *fallbackSource
+	fallbackOnce sync.Once
+	fallbackErr  error
+	fallbackNote string
+}
+
+// Credential is one set of registry credentials from a fallback source.
+type Credential struct {
+	Domain   string
+	Username string
+	Token    string
+}
+
+type fallbackSource struct {
+	name string
+	load func(ctx context.Context) ([]Credential, string, error)
+}
+
+// SetFallback registers a source of credentials that is consulted lazily.
+//
+// The point of the laziness is that the source is remote. Fetching credentials
+// from it up front means contacting it on every daemon start and on every run of
+// every command, for hosts that may never pull a private image at all. Deferring
+// it until a registry has actually refused us means it is contacted when — and
+// only when — it is the one thing that can help.
+func (a *RegistryAuth) SetFallback(name string, load func(ctx context.Context) ([]Credential, string, error)) {
+	a.fallback = &fallbackSource{name: name, load: load}
+}
+
+// LoadFallback consults the fallback source, at most once for the lifetime of
+// this RegistryAuth. It reports whether any new credentials became available.
+//
+// Failure is deliberately not retried: a source that is down stays down for the
+// length of a run, and hammering it once per image check would turn one outage
+// into a much slower one.
+func (a *RegistryAuth) LoadFallback(ctx context.Context) (bool, error) {
+	if a == nil || a.fallback == nil {
+		return false, nil
+	}
+	var added bool
+	a.fallbackOnce.Do(func() {
+		creds, note, err := a.fallback.load(ctx)
+		a.fallbackNote = note
+		if err != nil {
+			a.fallbackErr = err
+			return
+		}
+		for _, c := range creds {
+			a.AddCredentials(a.fallback.name, c.Domain, c.Username, c.Token)
+			added = true
+		}
+	})
+	return added, a.fallbackErr
+}
+
+// FallbackName reports the name of the lazy source, empty when there is none.
+func (a *RegistryAuth) FallbackName() string {
+	if a == nil || a.fallback == nil {
+		return ""
+	}
+	return a.fallback.name
+}
+
+// FallbackNote reports whatever the fallback source said about itself when it
+// was consulted, empty when it never was.
+func (a *RegistryAuth) FallbackNote() string {
+	if a == nil {
+		return ""
+	}
+	return a.fallbackNote
 }
 
 type namedAuth struct {

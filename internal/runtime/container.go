@@ -52,10 +52,16 @@ type Container struct {
 	Labels  map[string]string `json:"labels"`
 	Mounts  []Mount           `json:"mounts"`
 
-	// Inspect is the decoded engine response.
+	// Detailed reports whether Inspect and Raw are populated. A container that
+	// came from a listing carries only what the engine puts in a summary, which
+	// is everything needed to decide *whether* to act on it and nothing like
+	// enough to recreate it. Call Detail before using Inspect or Raw.
+	Detailed bool `json:"-"`
+	// Inspect is the decoded engine response. Only set when Detailed.
 	Inspect container.InspectResponse `json:"-"`
 	// Raw is the untouched JSON from the engine. This is what gets persisted,
-	// so fields added by future engine versions survive a round trip.
+	// so fields added by future engine versions survive a round trip. Only set
+	// when Detailed.
 	Raw json.RawMessage `json:"-"`
 }
 
@@ -103,6 +109,13 @@ func (c *Client) Inspect(ctx context.Context, ref string) (*Container, error) {
 }
 
 // List returns all containers, optionally including stopped ones.
+//
+// This is one API call, not one per container. The summary carries names,
+// labels, image and mounts — everything the selection engine reads — and none of
+// the configuration needed to recreate a container. The containers it returns
+// are therefore not Detailed; whoever needs more calls Detail on the few that
+// were actually selected. The difference is not academic: the daemon evaluates
+// every container on the host once a minute.
 func (c *Client) List(ctx context.Context, includeStopped bool) ([]*Container, error) {
 	res, err := c.api.ContainerList(ctx, client.ContainerListOptions{All: includeStopped})
 	if err != nil {
@@ -111,19 +124,22 @@ func (c *Client) List(ctx context.Context, includeStopped bool) ([]*Container, e
 
 	out := make([]*Container, 0, len(res.Items))
 	for _, summary := range res.Items {
-		// The summary lacks Config and HostConfig, and we need those for the
-		// spec. Inspect each one rather than carry a half-populated struct.
-		full, err := c.Inspect(ctx, summary.ID)
-		if err != nil {
-			if errors.Is(err, ErrNotFound) {
-				continue // vanished between list and inspect
-			}
-			return nil, err
-		}
-		out = append(out, full)
+		out = append(out, fromSummary(summary))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
+}
+
+// Detail returns the container with its full inspect payload, fetching it when
+// the container came from a listing. The result may be the same pointer.
+func (c *Client) Detail(ctx context.Context, in *Container) (*Container, error) {
+	if in == nil {
+		return nil, fmt.Errorf("no container to inspect")
+	}
+	if in.Detailed {
+		return in, nil
+	}
+	return c.Inspect(ctx, in.ID)
 }
 
 // FindComposeService locates the container belonging to one compose service.
@@ -210,14 +226,38 @@ func (c *Client) waitForState(ctx context.Context, id string, running bool) erro
 // ErrNotFound is returned when the engine does not know the requested object.
 var ErrNotFound = errors.New("not found")
 
+// fromSummary builds a container from a listing entry. Everything the selection
+// engine reads is present; Config, HostConfig and NetworkSettings are not, which
+// is why the result is not marked Detailed.
+func fromSummary(s container.Summary) *Container {
+	c := &Container{
+		ID:       s.ID,
+		Image:    s.Image,
+		ImageID:  s.ImageID,
+		State:    string(s.State),
+		Running:  s.State == container.StateRunning,
+		Labels:   map[string]string{},
+		Detailed: false,
+	}
+	if len(s.Names) > 0 {
+		c.Name = strings.TrimPrefix(s.Names[0], "/")
+	}
+	for k, v := range s.Labels {
+		c.Labels[k] = v
+	}
+	c.Mounts = mountsOf(s.Mounts)
+	return c
+}
+
 func fromInspect(in container.InspectResponse, raw json.RawMessage) *Container {
 	c := &Container{
-		ID:      in.ID,
-		Name:    strings.TrimPrefix(in.Name, "/"),
-		ImageID: in.Image,
-		Labels:  map[string]string{},
-		Inspect: in,
-		Raw:     raw,
+		ID:       in.ID,
+		Name:     strings.TrimPrefix(in.Name, "/"),
+		ImageID:  in.Image,
+		Labels:   map[string]string{},
+		Detailed: true,
+		Inspect:  in,
+		Raw:      raw,
 	}
 	if in.Config != nil {
 		c.Image = in.Config.Image
@@ -229,8 +269,16 @@ func fromInspect(in container.InspectResponse, raw json.RawMessage) *Container {
 		c.State = string(in.State.Status)
 		c.Running = in.State.Running
 	}
-	for _, m := range in.Mounts {
-		c.Mounts = append(c.Mounts, Mount{
+	c.Mounts = mountsOf(in.Mounts)
+	return c
+}
+
+// mountsOf converts the engine's mount points, in stable order. Listings and
+// inspect responses carry the same type here, so both go through this.
+func mountsOf(in []container.MountPoint) []Mount {
+	var out []Mount
+	for _, m := range in {
+		out = append(out, Mount{
 			Type:        mountType(m.Type),
 			Name:        m.Name,
 			Source:      m.Source,
@@ -238,8 +286,8 @@ func fromInspect(in container.InspectResponse, raw json.RawMessage) *Container {
 			ReadWrite:   m.RW,
 		})
 	}
-	sort.Slice(c.Mounts, func(i, j int) bool { return c.Mounts[i].Destination < c.Mounts[j].Destination })
-	return c
+	sort.Slice(out, func(i, j int) bool { return out[i].Destination < out[j].Destination })
+	return out
 }
 
 func mountType(t mount.Type) MountType {

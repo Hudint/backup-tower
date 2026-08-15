@@ -116,10 +116,31 @@ func (c *Checker) Check(ctx context.Context, cand *discover.Candidate) *Check {
 	return out
 }
 
-// remoteDigest tries each set of credentials in turn. Which source holds the
-// right secret for a registry is not knowable in advance, so asking is cheaper
-// than guessing — and only the last failure is worth reporting.
+// remoteDigest asks the registry, trying each set of credentials in turn.
+//
+// Only once every credential already at hand has been refused is the lazy
+// fallback source consulted — normally Komodo, which is a remote service. A host
+// whose images are public or covered by its own docker login therefore never
+// contacts it at all, and one that needs it contacts it once.
 func (c *Checker) remoteDigest(ctx context.Context, ref string) (string, error) {
+	digest, err := c.tryCredentials(ctx, ref)
+	if err == nil || !isAuthError(err) {
+		return digest, err
+	}
+
+	added, loadErr := c.auth.LoadFallback(ctx)
+	if loadErr != nil || !added {
+		// Nothing new to try. Report the registry's refusal rather than the
+		// fallback's own trouble: the refusal is what the operator has to act on.
+		return "", err
+	}
+	return c.tryCredentials(ctx, ref)
+}
+
+// tryCredentials walks the known credentials, stopping early on anything that is
+// not an authentication problem — a registry that cannot be reached will not be
+// reached with other credentials either. Only the last failure is worth reporting.
+func (c *Checker) tryCredentials(ctx context.Context, ref string) (string, error) {
 	var lastErr error
 	for _, auth := range c.auth.Attempts(ref) {
 		digest, err := c.rt.RemoteDigest(ctx, ref, auth)
@@ -128,8 +149,6 @@ func (c *Checker) remoteDigest(ctx context.Context, ref string) (string, error) 
 		}
 		lastErr = err
 		if !isAuthError(err) {
-			// A registry that cannot be reached will not be reached with other
-			// credentials either.
 			break
 		}
 	}

@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/moby/moby/api/types/container"
+
 	"github.com/Hudint/backup-tower/internal/discover"
 	"github.com/Hudint/backup-tower/internal/runtime"
 	"github.com/Hudint/backup-tower/internal/snapshot"
@@ -43,7 +45,7 @@ type recreateApplier struct {
 func (r *recreateApplier) name() discover.Strategy { return discover.StrategyRecreate }
 
 func (r *recreateApplier) apply(ctx context.Context, req *applyRequest) (string, []string, error) {
-	in := req.Container.Inspect
+	var in container.InspectResponse
 	if req.Spec != nil {
 		// Prefer the captured spec: it was taken before anything was touched,
 		// so it describes the container as it normally runs.
@@ -52,6 +54,15 @@ func (r *recreateApplier) apply(ctx context.Context, req *applyRequest) (string,
 			return "", nil, err
 		}
 		in = *captured
+	} else {
+		// No snapshot was taken, so there is no captured spec. The candidate
+		// came from a listing and carries only the summary; recreating needs the
+		// whole configuration, so fetch it now.
+		full, err := r.rt.Detail(ctx, req.Container)
+		if err != nil {
+			return "", nil, fmt.Errorf("read the current configuration of %s: %w", req.Container.Name, err)
+		}
+		in = full.Inspect
 	}
 
 	// The captured configuration cannot tell what the operator asked for apart

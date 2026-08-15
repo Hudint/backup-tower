@@ -198,8 +198,7 @@ itself; set `TOWER_HELPER_IMAGE` only if you renamed or retagged it.
 | `TOWER_CONCURRENCY` | `2` | Parallel snapshots. Disk throughput is the bottleneck. |
 | `TOWER_HELPER_IMAGE` | auto-detected | Image for helper containers. |
 | `TOWER_RULES_FILE` | — | Selection rules; most setups do not need one. |
-| `KOMODO_URL`, `_API_KEY`, `_API_SECRET` | — | Komodo as a selection and credential source. |
-| `KOMODO_TAG`, `KOMODO_SERVER` | — | Which tag opts in; which Komodo server this host is. |
+| `KOMODO_URL`, `_API_KEY`, `_API_SECRET` | — | Komodo as a source of registry credentials. Consulted only when a registry refuses this host's own. |
 | `DOCKER_HOST` | platform default | Engine endpoint. |
 
 Logs go to the container's stderr — `docker logs backup-tower`. Add `-v` for
@@ -405,41 +404,46 @@ snapshot directory that was deleted by other means.
 
 ## Selection in depth
 
-Beyond labels, two other sources can select containers. Precedence is
-**label > Komodo tag > rule file > default** — the more specific wins.
+Two sources decide what happens to a container: the labels on it, and the rule
+file. Precedence is **label > rule file > default** — the more specific wins.
+
+Neither is a subset of the other. Everything a label can set, a rule can set too,
+and a test enforces that so the two cannot drift apart. Use whichever fits: a
+label when the compose file is yours, a rule when it is not.
+
+Both are read locally — off the containers and off a file on disk — so deciding
+what to do never depends on anything being reachable.
 
 ### Rule file
 
-For containers whose compose file you would rather not touch. See
+For containers whose compose file you would rather not touch, or a policy that
+should apply to a whole group without editing every service definition. See
 [`rules.example.yaml`](rules.example.yaml); point `TOWER_RULES_FILE` at your copy.
 Rules apply in order and later matches override earlier ones, so write them
 broad-first, specific-last. Unknown keys are rejected when the file is loaded.
 
+A label on the container always overrides whatever a rule decided — and it
+overrides only what it names. A rule that sets `monitor_only` stays in force when
+a label sets nothing but `enable`.
+
 ### Komodo
 
-If you run [Komodo](https://komo.do), it can drive the whole policy. Map tag names
-to settings in the rule file, then tag a stack in the Komodo UI — no compose file
-to edit, no redeploy:
+If you run [Komodo](https://komo.do), it holds registry credentials for the
+images its stacks pull, and those never reach the host's docker configuration.
+backup-tower reads them, which is often the difference between a private image
+being checkable and not. Set `KOMODO_URL`, `KOMODO_API_KEY` and
+`KOMODO_API_SECRET`. Works with Komodo 2.2 and newer.
 
-```yaml
-komodo_tags:
-  - tag: bt-update
-    set: {enable: true, monitor_only: false, retention_keep: 5}
-  - tag: bt-snapshot-stop
-    set: {stop: always}
-  - tag: bt-rollback
-    set: {rollback: true}
-```
+That is the whole of the relationship, and it is deliberately lazy: Komodo is
+contacted only after a registry has refused the credentials this host already
+has. A host whose images are public, or covered by its own `docker login`, never
+calls out at all.
 
-Tagged stacks resolve to local containers through their compose project name,
-tagged deployments through their container name. Komodo manages several hosts
-while backup-tower sees only its own, so set `KOMODO_SERVER` to this host's Komodo
-server name — without it you get a warning rather than a guess.
-
-Komodo also holds registry credentials for the images its stacks pull, and those
-never reach the host's docker configuration. backup-tower reads them, which is
-often the difference between a private image being checkable and not. Works with
-Komodo 2.2 and newer.
+> Komodo used to be a selection source too — tag a stack, and it was configured.
+> That is gone. It made an external service a prerequisite for deciding anything,
+> so an unreachable Komodo meant no scheduled backups on the whole host, including
+> for containers configured entirely by label that needed nothing from it. Use
+> labels or the rule file instead.
 
 If Komodo's auto-update is on for a stack you hand to backup-tower, turn it off.
 Otherwise Komodo may update it first, without a snapshot, and the guarantee is

@@ -39,13 +39,13 @@ services:
       # Optional: selection rules for what labels cannot reach.
       # TOWER_RULES_FILE: /etc/backup-tower/rules.yaml
 
-      # Optional: Komodo as an additional selection source, and as a source of
-      # registry credentials for images its stacks pull.
+      # Optional: Komodo as a source of registry credentials for the images its
+      # stacks pull — those never reach this host's docker configuration. It is
+      # not a selection source, and it is contacted only after a registry has
+      # refused the credentials this host already has.
       # KOMODO_URL: https://komodo.example.com
       # KOMODO_API_KEY: ...
       # KOMODO_API_SECRET: ...
-      # KOMODO_TAG: auto-update
-      # KOMODO_SERVER: prod-01   # required when the tag spans several hosts
 
     volumes:
       # The engine. Everything else follows from this.

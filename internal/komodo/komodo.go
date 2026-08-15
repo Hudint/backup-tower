@@ -1,4 +1,18 @@
-package discover
+// Package komodo reads registry credentials from a Komodo Core instance.
+//
+// That is the whole of the relationship. Komodo was once a selection source as
+// well — it could say which stacks had been tagged for automatic updates — and
+// that is deliberately gone: it made an external service a prerequisite for
+// deciding anything, so an unreachable Komodo meant no backups at all, even for
+// containers configured entirely by label. Selection now lives on the container
+// and in the rule file, where it can be read without a network.
+//
+// What remains is a gap only Komodo can close. Images belonging to Komodo
+// managed stacks are pulled by its periphery agent, which logs in inside its own
+// container; none of that reaches this host's docker configuration, so a private
+// image simply looks unreachable from here. Asking Komodo is the only way to see
+// it, and it is asked only once a registry has actually refused us.
+package komodo
 
 import (
 	"bytes"
@@ -11,74 +25,32 @@ import (
 	"time"
 )
 
-// Komodo is used purely as an additional selection source: it answers "which
-// stacks did the operator tag for automatic updates", and nothing else. Updates
-// themselves still go through the normal path.
-//
-// That keeps the coupling to a single read call. Driving Komodo's own redeploy
-// would tie backup-tower to its API version and its idea of when a deployment is
-// finished, for no gain over doing the update directly.
-type KomodoConfig struct {
+// Config is what is needed to talk to a Komodo Core instance.
+type Config struct {
 	URL       string
 	APIKey    string
 	APISecret string
-	// Tag is the simple case: stacks and deployments carrying it are enabled.
-	// Richer per-tag policy comes from the rule file's komodo_tags section.
-	Tag string
-	// Server restricts results to one Komodo server. Komodo manages several
-	// hosts, and backup-tower only ever sees the containers on its own — acting
-	// on a stack that lives elsewhere would do nothing at best.
-	Server  string
-	Timeout time.Duration
+	Timeout   time.Duration
 }
 
-// Configured reports whether enough was supplied to talk to Komodo. A tag is
-// not required: the rule file may map tags to settings instead.
-func (c KomodoConfig) Configured() bool {
+// Configured reports whether enough was supplied to talk to Komodo.
+func (c Config) Configured() bool {
 	return c.URL != "" && c.APIKey != "" && c.APISecret != ""
 }
 
-// KomodoResource is a tagged stack or deployment.
-type KomodoResource struct {
-	ID   string `json:"id"`
-	Type string `json:"type"`
-	Name string `json:"name"`
-	Tags []string
-	Info struct {
-		ServerID   string `json:"server_id"`
-		ServerName string `json:"server_name"`
-		// CustomName is the container name of a deployment when it differs
-		// from the deployment's own name.
-		CustomName string `json:"custom_name"`
-	} `json:"info"`
-}
-
-// KomodoClient talks to a Komodo Core instance.
-type KomodoClient struct {
-	cfg  KomodoConfig
+// Client talks to a Komodo Core instance.
+type Client struct {
+	cfg  Config
 	http *http.Client
 }
 
-// NewKomodoClient builds a client.
-func NewKomodoClient(cfg KomodoConfig) *KomodoClient {
+// New builds a client.
+func New(cfg Config) *Client {
 	timeout := cfg.Timeout
 	if timeout == 0 {
 		timeout = 20 * time.Second
 	}
-	return &KomodoClient{
-		cfg:  cfg,
-		http: &http.Client{Timeout: timeout},
-	}
-}
-
-// KomodoSelection is what Komodo contributed: which local objects carry which
-// Komodo tags.
-type KomodoSelection struct {
-	// Projects maps a compose project name to the tags its stack carries.
-	Projects map[string][]string
-	// Containers maps a container name to the tags its deployment carries.
-	Containers map[string][]string
-	Warnings   []string
+	return &Client{cfg: cfg, http: &http.Client{Timeout: timeout}}
 }
 
 // RegistryAccount is a set of registry credentials Komodo holds.
@@ -89,12 +61,7 @@ type RegistryAccount struct {
 }
 
 // RegistryAccounts fetches the registry credentials Komodo manages.
-//
-// Images belonging to Komodo-managed stacks are pulled by Komodo's periphery
-// agent, which logs in with these credentials inside its own container. Nothing
-// of that reaches the host's docker configuration, so a private image looks
-// simply unreachable from here — asking Komodo is the only way to see it.
-func (c *KomodoClient) RegistryAccounts(ctx context.Context) ([]RegistryAccount, error) {
+func (c *Client) RegistryAccounts(ctx context.Context) ([]RegistryAccount, error) {
 	// Komodo renamed this request in v2.3.0. Both names are tried rather than
 	// pinning a version, because the alternative is a tool that silently stops
 	// finding credentials the day someone upgrades — or, as here, one that never
@@ -120,7 +87,7 @@ func isUnknownRequest(err error) bool {
 }
 
 // Version reports the Komodo version, for diagnostics.
-func (c *KomodoClient) Version(ctx context.Context) (string, error) {
+func (c *Client) Version(ctx context.Context) (string, error) {
 	body, err := c.post(ctx, "GetVersion", map[string]any{})
 	if err != nil {
 		return "", err
@@ -134,15 +101,8 @@ func (c *KomodoClient) Version(ctx context.Context) (string, error) {
 	return out.Version, nil
 }
 
-func (c *KomodoClient) onThisServer(r KomodoResource) bool {
-	if c.cfg.Server == "" {
-		return true
-	}
-	return r.Info.ServerName == c.cfg.Server || r.Info.ServerID == c.cfg.Server
-}
-
 // post performs one read request and returns the raw response body.
-func (c *KomodoClient) post(ctx context.Context, requestType string, params map[string]any) ([]byte, error) {
+func (c *Client) post(ctx context.Context, requestType string, params map[string]any) ([]byte, error) {
 	body, err := json.Marshal(params)
 	if err != nil {
 		return nil, fmt.Errorf("encode %s request: %w", requestType, err)

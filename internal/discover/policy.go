@@ -82,8 +82,8 @@ func Defaults(retentionKeep, retentionDays int) Policy {
 // Origin records where a setting came from, so a decision can be explained
 // rather than merely asserted.
 type Origin struct {
-	// Source is a short identifier: "default", "config", "rule[2]", "komodo",
-	// or "label".
+	// Source is a short identifier: "default", "config", "rule[2]" or
+	// "label".
 	Source string
 	// Detail names the specific setting or rule involved.
 	Detail string
