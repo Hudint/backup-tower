@@ -55,6 +55,16 @@ func openEnv(cmd *cobra.Command, withEngine bool) (*env, error) {
 			e.Close()
 			return nil, err
 		}
+		// Reaching another container's volumes needs a helper container, and the
+		// only image guaranteed to carry the archiving code is this one. Working
+		// that out here means a fresh install takes a snapshot on the first try
+		// instead of failing for a reason unrelated to what was asked.
+		if e.cfg.HelperImage == "" {
+			if img := e.rt.SelfImage(cmd.Context()); img != "" {
+				e.cfg.HelperImage = img
+				e.log.Debug("using our own image for helper containers", "image", img)
+			}
+		}
 	}
 	return e, nil
 }
