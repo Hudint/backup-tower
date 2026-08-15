@@ -160,6 +160,31 @@ public, or covered by its own `docker login`, never contacts it. Its request
 names are tried under both their pre- and post-2.3.0 spellings, because pinning
 either one means silently losing credentials on one side of that boundary.
 
+## Doing several things at once
+
+Registry checks overlap; nothing else does. A check asks a question and changes
+nothing, and almost all of it is latency — a manifest lookup on a normal host is
+around 0.6 seconds of waiting, so twenty containers checked one after another
+took eighteen seconds and the same twenty checked together take under two.
+Applying an update is the opposite in every respect, and stays strictly
+sequential, in dependency order.
+
+Anything that touches a container takes a per-container lock first, and the lock
+is an advisory file lock rather than a mutex because the collision worth
+preventing crosses process boundaries: the daemon's update pass and a
+`backup-tower snapshot` typed at that moment cannot see each other, and a
+snapshot taken halfway through a replacement would record a state that never
+existed. The daemon skips a container that is busy — the work is due again on the
+next tick, and waiting would stall every container behind it — while a command
+typed at a terminal waits its turn, because the person running it asked for that
+container specifically.
+
+The update loop and the scheduled-backup loop are independent. They shared one
+`select` at first, which meant an update pass — minutes, when it replaces
+something — held up the minute tick the schedules run on, and backups drifted
+behind their cron times for as long as the pass took. Separating them is only
+safe because of the locks.
+
 ## Reporting
 
 A strategy that hands back the same container did not replace anything, and

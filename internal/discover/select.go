@@ -54,9 +54,24 @@ func (c *Candidate) SkipReason() string {
 		return "not enabled"
 	case c.Decision.Policy.MonitorOnly:
 		return "monitor only"
-	case c.Updatability == LocalImage:
+	default:
+		return c.UpdatabilityReason()
+	}
+}
+
+// UpdatabilityReason explains why this image cannot be checked against a
+// registry, empty when it can.
+//
+// Kept apart from SkipReason because they answer different questions. "Why is
+// this container not being updated" is answered by the policy first; "why was
+// the registry not asked" is only ever about the image. Reporting the policy
+// answer to the second question tells someone to change a setting that will not
+// help.
+func (c *Candidate) UpdatabilityReason() string {
+	switch c.Updatability {
+	case LocalImage:
 		return "image built locally, no registry to check"
-	case c.Updatability == UnnamedImage:
+	case UnnamedImage:
 		return "image has no name, only an ID"
 	default:
 		return ""

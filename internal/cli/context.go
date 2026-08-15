@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Hudint/backup-tower/internal/config"
+	"github.com/Hudint/backup-tower/internal/lock"
 	"github.com/Hudint/backup-tower/internal/runtime"
 	"github.com/Hudint/backup-tower/internal/snapshot/store"
 )
@@ -18,6 +19,9 @@ type env struct {
 	store store.Store
 	rt    *runtime.Client
 	log   *slog.Logger
+	// locks serialises work on a single container across every process that
+	// shares this backup directory.
+	locks *lock.Locker
 }
 
 func (e *env) Close() {
@@ -46,6 +50,14 @@ func openEnv(cmd *cobra.Command, withEngine bool) (*env, error) {
 
 	e.store, err = store.Open(cfg.BackupDir)
 	if err != nil {
+		return nil, err
+	}
+
+	// Locks live beside the backups because that is the one directory every
+	// process working on these containers already agrees on.
+	e.locks, err = lock.New(cfg.BackupDir)
+	if err != nil {
+		e.Close()
 		return nil, err
 	}
 

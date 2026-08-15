@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -68,33 +69,58 @@ func newDaemonCmd() *cobra.Command {
 				}
 			}
 
-			updates := time.NewTicker(interval)
-			defer updates.Stop()
+			// Two independent loops. They used to share one select, which meant
+			// an update pass — minutes, when it actually replaces something —
+			// blocked the minute tick that scheduled backups run on, and those
+			// drifted behind their cron times for as long as the pass took.
+			//
+			// Running them separately is only safe because both take a
+			// per-container lock first, so the one thing that must never happen
+			// concurrently — two runs touching the same container — still cannot.
+			var wg sync.WaitGroup
+			wg.Add(2)
 
-			// Scheduled backups are checked every minute, which is the finest
-			// resolution a cron expression can ask for.
-			backups := time.NewTicker(time.Minute)
-			defer backups.Stop()
-			scheduler := schedule.NewChecker(e.store, time.Now())
-
-			for {
-				select {
-				case <-cmd.Context().Done():
-					e.log.Info("daemon stopping")
-					return nil
-				case <-updates.C:
-					if err := daemonPass(cmd, e, updater, opts); err != nil {
-						// A failing pass must not end the daemon: the next one
-						// may well succeed, and a silent exit would look exactly
-						// like a daemon that is running fine.
-						e.log.Error("update pass failed", "error", err)
-					}
-				case <-backups.C:
-					if err := scheduledBackups(cmd, e, scheduler, forceHelper); err != nil {
-						e.log.Error("scheduled backup pass failed", "error", err)
+			go func() {
+				defer wg.Done()
+				ticker := time.NewTicker(interval)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-cmd.Context().Done():
+						return
+					case <-ticker.C:
+						if err := daemonPass(cmd, e, updater, opts); err != nil {
+							// A failing pass must not end the daemon: the next
+							// one may well succeed, and a silent exit would look
+							// exactly like a daemon that is running fine.
+							e.log.Error("update pass failed", "error", err)
+						}
 					}
 				}
-			}
+			}()
+
+			go func() {
+				defer wg.Done()
+				// Checked every minute, which is the finest resolution a cron
+				// expression can ask for.
+				ticker := time.NewTicker(time.Minute)
+				defer ticker.Stop()
+				scheduler := schedule.NewChecker(e.store, time.Now())
+				for {
+					select {
+					case <-cmd.Context().Done():
+						return
+					case <-ticker.C:
+						if err := scheduledBackups(cmd, e, scheduler, forceHelper); err != nil {
+							e.log.Error("scheduled backup pass failed", "error", err)
+						}
+					}
+				}
+			}()
+
+			wg.Wait()
+			e.log.Info("daemon stopping")
+			return nil
 		},
 	}
 
@@ -133,13 +159,29 @@ func daemonPass(cmd *cobra.Command, e *env, updater *update.Updater, opts update
 		return nil
 	}
 
-	var updated, failed, upToDate int
+	// Ask every registry at once before touching anything. This is pure waiting,
+	// so overlapping it turns a pass that scaled with the number of containers
+	// into one that barely does.
+	opts.Concurrency = e.cfg.Concurrency
+	opts.Checks = updater.Checker().CheckAll(ctx, enabled, e.cfg.Concurrency)
+
+	var updated, failed, upToDate, busy int
 	var errs []error
 	for _, c := range update.Order(enabled) {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		// Skip rather than wait. Whatever holds the lock is already doing this
+		// container's work, and blocking here would stall every container behind
+		// it for the sake of one that is being handled anyway.
+		release, err := e.locks.TryAcquire(c.Container.Name)
+		if err != nil {
+			busy++
+			e.log.Info("skipping container, another run has it", "container", c.Container.Name)
+			continue
+		}
 		res := updater.Update(ctx, c, opts)
+		release()
 		switch res.Outcome {
 		case update.OutcomeUpdated:
 			updated++
@@ -176,7 +218,7 @@ func daemonPass(cmd *cobra.Command, e *env, updater *update.Updater, opts update
 
 	e.log.Info("update pass finished",
 		"containers", len(enabled), "updated", updated, "up_to_date", upToDate,
-		"failed", failed, "took", time.Since(started).Round(time.Second))
+		"failed", failed, "busy", busy, "took", time.Since(started).Round(time.Second))
 	return errors.Join(errs...)
 }
 
@@ -231,6 +273,16 @@ func scheduledBackups(cmd *cobra.Command, e *env, scheduler *schedule.Checker, f
 			"container", c.Container.Name, "schedule", policy.Schedule,
 			"scheduled_for", due.ScheduledFor.Format(time.RFC3339))
 
+		// An update pass may be replacing this very container. Snapshotting it
+		// halfway through would capture a state that never existed, and the
+		// backup is due again on the next tick anyway.
+		release, err := e.locks.TryAcquire(c.Container.Name)
+		if err != nil {
+			e.log.Info("scheduled backup deferred, another run has this container",
+				"container", c.Container.Name)
+			continue
+		}
+
 		// A scheduled backup defaults to reading hot. Creating downtime on a
 		// timer is not a decision to make on the operator's behalf; stopping
 		// first is available, but has to be asked for.
@@ -244,6 +296,7 @@ func scheduledBackups(cmd *cobra.Command, e *env, scheduler *schedule.Checker, f
 			IncludeBinds: policy.IncludeBinds,
 			Level:        e.cfg.ZstdLevel,
 		})
+		release()
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", c.Container.Name, err))
 			continue

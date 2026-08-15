@@ -87,10 +87,17 @@ func newUpdateCmd() *cobra.Command {
 				fmt.Fprintln(out, "note: the docker compose plugin was not found; compose-managed containers will be recreated through the API instead")
 			}
 
+			// Ask every registry at once, then work through the containers one
+			// at a time. Almost all of a check is latency, so overlapping the
+			// asking turns a pass from seconds-per-container into roughly one
+			// container's worth of waiting; applying an update is never
+			// overlapped, because that is where the risk is.
 			opts := update.Options{
-				DryRun:    dryRun,
-				Force:     force,
-				ZstdLevel: e.cfg.ZstdLevel,
+				DryRun:      dryRun,
+				Force:       force,
+				ZstdLevel:   e.cfg.ZstdLevel,
+				Concurrency: e.cfg.Concurrency,
+				Checks:      updater.Checker().CheckAll(ctx, candidates, e.cfg.Concurrency),
 				Health: update.HealthOptions{
 					Timeout:  healthTimeout,
 					Settle:   settle,
@@ -98,7 +105,7 @@ func newUpdateCmd() *cobra.Command {
 				},
 			}
 
-			results := runUpdates(ctx, updater, candidates, opts, out)
+			results := runUpdates(ctx, e, updater, candidates, opts, out)
 			return summariseUpdates(out, results, dryRun)
 		},
 	}
@@ -130,7 +137,7 @@ func newUpdater(ctx context.Context, e *env, forceHelper bool) (*update.Updater,
 
 // runUpdates processes candidates in dependency order, reporting as it goes so
 // a long run is legible while it happens rather than only at the end.
-func runUpdates(ctx context.Context, u *update.Updater, candidates []*discover.Candidate, opts update.Options, out io.Writer) []*update.Result {
+func runUpdates(ctx context.Context, e *env, u *update.Updater, candidates []*discover.Candidate, opts update.Options, out io.Writer) []*update.Result {
 	ordered := update.Order(candidates)
 	results := make([]*update.Result, 0, len(ordered))
 
@@ -138,7 +145,19 @@ func runUpdates(ctx context.Context, u *update.Updater, candidates []*discover.C
 		if ctx.Err() != nil {
 			break
 		}
+		// Wait rather than skip. Someone typing this command asked for these
+		// containers, so queueing behind a daemon pass is what they want; being
+		// turned away with "busy" would just mean typing it again.
+		release, err := e.locks.Acquire(ctx, c.Container.Name)
+		if err != nil {
+			if ctx.Err() != nil {
+				break
+			}
+			fmt.Fprintf(out, "  %-40s skipped: %v\n", c.Container.Name, err)
+			continue
+		}
 		res := u.Update(ctx, c, opts)
+		release()
 		results = append(results, res)
 		fmt.Fprintf(out, "  %-40s %s\n", res.Container, res.Describe())
 		for _, w := range res.Warnings {

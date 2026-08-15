@@ -132,14 +132,14 @@ func runChecks(ctx context.Context, e *env, candidates []*discover.Candidate, al
 	}
 	checker := update.NewChecker(e.rt, auth)
 
-	out := make(map[string]*update.Check, len(candidates))
+	wanted := make([]*discover.Candidate, 0, len(candidates))
 	for _, c := range candidates {
 		if !all && !c.Decision.Policy.Enabled {
 			continue
 		}
-		out[c.Container.Name] = checker.Check(ctx, c)
+		wanted = append(wanted, c)
 	}
-	return out, nil
+	return checker.CheckAll(ctx, wanted, e.cfg.Concurrency), nil
 }
 
 func printPlanTable(out io.Writer, candidates []*discover.Candidate, checks map[string]*update.Check, showAll bool) {

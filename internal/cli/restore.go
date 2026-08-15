@@ -132,6 +132,14 @@ func runRestore(cmd *cobra.Command, args []string, opts snapshot.RestoreOptions,
 		}
 	}
 
+	// A restore rewrites volume contents and may replace the container. Nothing
+	// else may be working on it while that happens.
+	release, err := e.locks.Acquire(ctx, container)
+	if err != nil {
+		return err
+	}
+	defer release()
+
 	report, err := restorer.Restore(ctx, container, id, opts)
 	if report != nil {
 		printReport(out, report)

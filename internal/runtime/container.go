@@ -124,10 +124,37 @@ func (c *Client) List(ctx context.Context, includeStopped bool) ([]*Container, e
 
 	out := make([]*Container, 0, len(res.Items))
 	for _, summary := range res.Items {
-		out = append(out, fromSummary(summary))
+		item := fromSummary(summary)
+		// A listing reports the image the container resolves to, not the
+		// reference it was created from, and when that image has lost its tags
+		// the engine fills the field with the id instead. Both the rule file's
+		// image globs and the update check read this as a reference, so the id
+		// would silently stop matching and turn a checkable container into an
+		// unnameable one. Inspecting recovers what the operator actually asked
+		// for — and only for the few containers where it is missing.
+		if summaryGaveTheImageID(item.Image, item.ImageID) {
+			if full, err := c.Inspect(ctx, item.ID); err == nil {
+				out = append(out, full)
+				continue
+			}
+		}
+		out = append(out, item)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
+}
+
+// summaryGaveTheImageID reports whether a listing handed back the image id in
+// place of a reference, which is what happens once an image has no repo tags
+// left.
+func summaryGaveTheImageID(image, imageID string) bool {
+	if image == "" {
+		return true
+	}
+	if len(image) < 12 {
+		return false
+	}
+	return strings.HasPrefix(strings.TrimPrefix(imageID, "sha256:"), strings.TrimPrefix(image, "sha256:"))
 }
 
 // Detail returns the container with its full inspect payload, fetching it when

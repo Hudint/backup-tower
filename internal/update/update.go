@@ -65,6 +65,14 @@ type Options struct {
 	ComposeTimeout time.Duration
 	// ZstdLevel is passed to snapshots.
 	ZstdLevel int
+	// Concurrency bounds how many registry checks run at once. Applying an
+	// update is never parallel; only the asking is.
+	Concurrency int
+	// Checks holds results from an earlier batch check, keyed by container
+	// name. A container found here is not asked about again — the point of
+	// checking in a batch is to overlap the waiting, which is lost if the
+	// sequential pass repeats the work.
+	Checks map[string]*Check
 }
 
 // Updater applies updates.
@@ -102,6 +110,10 @@ func NewUpdater(rt *runtime.Client, st store.Store, src *source.Accessor, auth *
 // ComposeAvailable reports whether the compose plugin was found.
 func (u *Updater) ComposeAvailable() bool { return u.composeBinary != "" }
 
+// Checker exposes the registry checker so callers can batch their lookups
+// before working through the containers one at a time.
+func (u *Updater) Checker() *Checker { return u.checker }
+
 // Update processes one candidate.
 //
 // The sequence is deliberate. The image is pulled while the container is still
@@ -115,7 +127,10 @@ func (u *Updater) Update(ctx context.Context, cand *discover.Candidate, opts Opt
 	res := &Result{Container: cand.Container.Name, Strategy: cand.Strategy}
 	defer func() { res.Duration = time.Since(started) }()
 
-	res.Check = u.checker.Check(ctx, cand)
+	res.Check = opts.Checks[cand.Container.Name]
+	if res.Check == nil {
+		res.Check = u.checker.Check(ctx, cand)
+	}
 	switch {
 	case res.Check.State == StateFailed:
 		res.Outcome = OutcomeFailed

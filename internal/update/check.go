@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/Hudint/backup-tower/internal/discover"
 	"github.com/Hudint/backup-tower/internal/runtime"
@@ -63,7 +64,12 @@ func (c *Checker) Check(ctx context.Context, cand *discover.Candidate) *Check {
 
 	if cand.Updatability != discover.Updatable {
 		out.State = StateSkipped
-		out.Reason = cand.SkipReason()
+		// Name the reason the check was skipped, not the first reason the
+		// container is not being updated. Those are different questions, and
+		// answering the wrong one sends people to change a setting that will
+		// not help — "monitor only" reads as "turn that off and I will check",
+		// when the truth is that the image has no registry to check against.
+		out.Reason = cand.UpdatabilityReason()
 		return out
 	}
 
@@ -157,6 +163,47 @@ func (c *Checker) tryCredentials(ctx context.Context, ref string) (string, error
 
 // Auth exposes the resolved credentials so a pull can use the same ones.
 func (c *Checker) Auth() *runtime.RegistryAuth { return c.auth }
+
+// CheckAll asks about many containers at once, keyed by container name.
+//
+// Nearly all of a check is waiting: a manifest lookup is a TLS handshake, a
+// token fetch and one request, and on this host that is around 0.6 seconds
+// during which nothing is computed. Done one after another, twenty containers
+// take twenty times that — long enough that it starts to dictate how short the
+// daemon's interval can sensibly be, which is a strange thing to let latency
+// decide. Waiting in parallel costs nothing but sockets.
+//
+// Checks are safe to overlap because they change nothing: they ask a registry a
+// question. Applying an update is the opposite, and stays strictly sequential.
+func (c *Checker) CheckAll(ctx context.Context, cands []*discover.Candidate, concurrency int) map[string]*Check {
+	if concurrency < 1 {
+		concurrency = 1
+	}
+
+	out := make(map[string]*Check, len(cands))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, concurrency)
+
+	for _, cand := range cands {
+		wg.Add(1)
+		go func(cand *discover.Candidate) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				return
+			}
+			res := c.Check(ctx, cand)
+			mu.Lock()
+			out[cand.Container.Name] = res
+			mu.Unlock()
+		}(cand)
+	}
+	wg.Wait()
+	return out
+}
 
 // Describe renders a check result as one line.
 func (c *Check) Describe() string {

@@ -43,6 +43,12 @@ type RegistryAuth struct {
 	// already known. See SetFallback.
 	fallback     *fallbackSource
 	fallbackOnce sync.Once
+
+	// mu guards everything the fallback can write after this value is shared.
+	// Checks run concurrently, so one goroutine may be loading credentials
+	// while another is reading them; byRegistry is not covered because it is
+	// filled before the value is handed out and never written again.
+	mu           sync.RWMutex
 	fallbackErr  error
 	fallbackNote string
 }
@@ -83,9 +89,13 @@ func (a *RegistryAuth) LoadFallback(ctx context.Context) (bool, error) {
 	var added bool
 	a.fallbackOnce.Do(func() {
 		creds, note, err := a.fallback.load(ctx)
+
+		a.mu.Lock()
 		a.fallbackNote = note
+		a.fallbackErr = err
+		a.mu.Unlock()
+
 		if err != nil {
-			a.fallbackErr = err
 			return
 		}
 		for _, c := range creds {
@@ -93,6 +103,9 @@ func (a *RegistryAuth) LoadFallback(ctx context.Context) (bool, error) {
 			added = true
 		}
 	})
+
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return added, a.fallbackErr
 }
 
@@ -110,6 +123,8 @@ func (a *RegistryAuth) FallbackNote() string {
 	if a == nil {
 		return ""
 	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return a.fallbackNote
 }
 
@@ -126,6 +141,8 @@ type namedAuth struct {
 // every candidate is tried in turn, which is both cheaper and more honest than
 // being wrong about precedence.
 func (a *RegistryAuth) AddCredentials(source, domain, username, token string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if a.extra == nil {
 		a.extra = map[string][]namedAuth{}
 	}
@@ -156,9 +173,11 @@ func (a *RegistryAuth) AddCredentials(source, domain, username, token string) {
 // RedactedSource names the source that knows about a reference's registry but
 // handed over no usable secret, empty when there is none.
 func (a *RegistryAuth) RedactedSource(ref string) string {
-	if a == nil || len(a.emptyTokens) == 0 {
+	if a == nil {
 		return ""
 	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return a.emptyTokens[domainOf(ref)]
 }
 
@@ -193,9 +212,11 @@ func (a *RegistryAuth) Attempts(ref string) []string {
 	if host := a.For(ref); host != "" {
 		out = append(out, host)
 	}
+	a.mu.RLock()
 	for _, extra := range a.extra[domainOf(ref)] {
 		out = append(out, extra.encoded)
 	}
+	a.mu.RUnlock()
 	return append(out, "")
 }
 

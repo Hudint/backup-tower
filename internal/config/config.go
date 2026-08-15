@@ -12,13 +12,13 @@ import (
 	"time"
 )
 
-// Defaults chosen for a host with many containers and one dominant volume: disk
-// throughput is the bottleneck, so concurrency stays low, and compression stays
-// at the level where it costs little downtime.
+// Defaults chosen for a host with many containers and one dominant volume:
+// compression stays at the level where it costs little downtime, and
+// concurrency is set for what it actually governs — see Concurrency.
 const (
 	DefaultBackupDir     = "/backups"
 	DefaultZstdLevel     = 3
-	DefaultConcurrency   = 2
+	DefaultConcurrency   = 8
 	DefaultRetentionKeep = 3
 	DefaultRetentionDays = 14
 	DefaultInterval      = 6 * time.Hour
@@ -32,6 +32,17 @@ type Config struct {
 	// direct path must work, which it does when running on the engine host.
 	HelperImage string
 	ZstdLevel   int
+	// Concurrency bounds how many registry checks run at once.
+	//
+	// A check is a manifest lookup: a TLS handshake, a token fetch and one
+	// request, of which essentially all is waiting. Overlapping it costs
+	// sockets and nothing else, and the difference is not marginal — twenty
+	// containers take eighteen seconds one after another and under two when
+	// they wait together. Eight is enough to collect most of that without a
+	// small self-hosted registry seeing a burst that looks like abuse.
+	//
+	// Archiving is deliberately not covered by this. That one is bound by disk
+	// throughput rather than latency, and it runs sequentially.
 	Concurrency int
 
 	RetentionKeep int

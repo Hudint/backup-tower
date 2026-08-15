@@ -195,7 +195,7 @@ itself; set `TOWER_HELPER_IMAGE` only if you renamed or retagged it.
 | `TOWER_RETENTION_KEEP` | `3` | Snapshots to keep per container. |
 | `TOWER_RETENTION_DAYS` | `14` | Keep anything younger than this, regardless of count. |
 | `TOWER_ZSTD_LEVEL` | `3` | Compression level 1–19. During an update this is downtime. |
-| `TOWER_CONCURRENCY` | `2` | Parallel snapshots. Disk throughput is the bottleneck. |
+| `TOWER_CONCURRENCY` | `8` | Registry checks run at once. Almost all of a check is waiting, so this is worth having. Archiving is sequential regardless. |
 | `TOWER_HELPER_IMAGE` | auto-detected | Image for helper containers. |
 | `TOWER_RULES_FILE` | — | Selection rules; most setups do not need one. |
 | `KOMODO_URL`, `_API_KEY`, `_API_SECRET` | — | Komodo as a source of registry credentials. Consulted only when a registry refuses this host's own. |
@@ -272,19 +272,20 @@ nothing immediately. `--run-now` overrides that.
 
 **Why the interval defaults to 6 hours.** Not because checking is expensive. A
 pass asks each registry for a manifest digest and downloads nothing, which is
-cheap enough that Docker Hub does not even count it against your pull limit.
+cheap enough that Docker Hub does not even count it against your pull limit, and
+the checks run concurrently — twenty containers take under two seconds.
 
-It is the *update* that is expensive. Finding a new digest here means stopping
-the container, archiving every volume it owns and waiting out a health gate —
-seconds to minutes of downtime, and a snapshot on disk. That is not something to
-trigger four minutes after a release rather than four hours after it, and a
-shorter interval buys nothing but a narrower window in which you are running the
-old version. Watchtower defaults to 24 hours; 6 is already four times that.
+It is the *update* that is expensive. Finding a new digest means stopping the
+container, archiving every volume it owns and waiting out a health gate — seconds
+to minutes of downtime, and a snapshot on disk. A shorter interval buys nothing
+but a narrower window in which you are running the old version. Watchtower
+defaults to 24 hours; 6 is already four times that.
 
-Set `TOWER_INTERVAL` to whatever suits your setup — `30m` is perfectly sensible
-for a handful of containers you want to follow closely. The 30-second figure that
-turns up in Watchtower tutorials is a demo setting, so the writer does not have
-to wait around.
+Set `TOWER_INTERVAL` to whatever suits you. Short intervals are safe: the two
+loops are independent, so a long update pass does not delay scheduled backups,
+and everything takes a per-container lock first, so passes cannot tread on each
+other or on a command you type while one is running. Below about a minute you are
+mostly asking registries the same question repeatedly.
 
 ### What happens during an update
 

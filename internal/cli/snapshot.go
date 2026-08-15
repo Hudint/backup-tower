@@ -44,6 +44,15 @@ func newSnapshotCmd() *cobra.Command {
 				level = e.cfg.ZstdLevel
 			}
 
+			// Hold the container against a daemon pass that may be replacing it.
+			// A snapshot taken while an update is halfway through would capture
+			// a state that never existed.
+			release, err := e.locks.Acquire(cmd.Context(), args[0])
+			if err != nil {
+				return err
+			}
+			defer release()
+
 			taker := snapshot.NewTaker(e.rt, e.store, source.New(e.rt, opts), toolName(), e.log)
 			m, err := taker.Take(cmd.Context(), args[0], snapshot.Options{
 				Trigger:      snapshot.TriggerManual,
