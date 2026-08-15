@@ -563,3 +563,10 @@ place.
 
 [DESIGN.md](DESIGN.md) — the reasoning behind the decisions above, most of which
 was paid for with a bug.
+
+## A note on how this was built
+
+backup-tower was written with Claude (Anthropic) as a coding assistant. The
+design decisions, the review, and the testing against a real host with a hundred
+containers were done together; several of the bugs recorded in DESIGN.md were
+found that way rather than by reading the code.
