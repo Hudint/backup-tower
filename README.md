@@ -561,8 +561,9 @@ place.
 
 ## Why it works this way
 
-[DESIGN.md](DESIGN.md) — the reasoning behind the decisions above, most of which
-was paid for with a bug.
+[DESIGN.md](DESIGN.md) explains why the tool behaves the way it does. Most of
+those decisions were not planned in advance — they came out of a bug that had to
+be fixed, and the explanation is there so the same mistake is not made twice.
 
 ## A note on how this was built
 

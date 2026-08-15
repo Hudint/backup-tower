@@ -1,8 +1,11 @@
 # Design notes
 
 Why backup-tower works the way it does. None of this is needed to use the tool —
-see the [README](README.md) for that. It is here because most of these decisions
-were paid for with a bug, and the reasoning is worth more than the conclusion.
+see the [README](README.md) for that.
+
+Most of what follows was not designed up front. Each section describes a bug that
+had to be fixed and the rule that came out of fixing it, written down so the
+reasoning survives longer than the memory of the incident.
 
 ## The central bet
 
@@ -158,4 +161,5 @@ interleave with it and end up appearing under the wrong container — which
 produced "container has no storage to archive" under a database that had just
 archived a 3.7 MiB volume.
 
-This tool is worth exactly as much as its reports are.
+A tool like this is only useful if its output can be trusted, so a report that
+overstates what happened is treated as a defect rather than a cosmetic issue.
