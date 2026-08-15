@@ -1,8 +1,10 @@
 # backup-tower
 
-Automatic container updates that keep a way back.
+**Automatic Docker container updates that keep a way back.** Like Watchtower, but
+it snapshots your volumes and configuration before every update — so a bad
+release can be undone.
 
-Watchtower updates containers but saves nothing. When an update goes wrong — a
+Watchtower updates containers and saves nothing. When an update goes wrong — a
 broken migration, an incompatible config, a bad image — the data in the volume
 has already changed and there is no way back. backup-tower closes that gap.
 
@@ -11,295 +13,403 @@ exactly the moment when volumes are cold and a consistent copy costs nothing —
 no `pg_dump`, no `fsfreeze`, no application knowledge.
 
 ```
-check image → stop container → snapshot (cold, consistent)
-   → start with the new image → health gate → ok: done / failed: roll back
+check the registry → pull → stop → snapshot → replace → health check
+                                                    ↓ failed
+                                                roll back
 ```
 
-## Status
+Your backups are plain `tar` archives compressed with zstd. If this tool is gone,
+broken, or a version that cannot read its own older output, `tar --zstd -xf`
+still gets your data out — and a test extracts an archive with the system `tar`
+binary so that cannot quietly stop being true.
 
-All five milestones are complete. The tool does what it set out to do: update
-containers automatically without ever losing the way back.
+> **An update broke something?** Jump to [Recovery](#recovery).
 
-| | |
-|---|---|
-| ✅ M1 | Snapshot container configuration, named volumes and bind mounts |
-| ✅ M2 | Restore and rollback |
-| ✅ M3 | Selection engine and dry run |
-| ✅ M4 | Update engine with health gate |
-| ✅ M5 | Scheduling, retention, packaging |
+Feature complete, pre-1.0. Docker on Linux. No published image yet —
+you build it, in one command, below.
 
-Deliberately not in this version: restic and remote backup targets,
-notifications (the events are already routed through one place for a notifier to
-attach to), writable-layer snapshots, and the Podman quadlet path.
+---
 
-## Storage format
+## Requirements
 
-Nothing proprietary. A snapshot is a directory of plain tar archives compressed
-with zstd:
+- **Linux**, with Docker (engine API 1.40 or newer; tested against 29.x)
+- Podman also works in principle: it serves the same API. Untested — reports
+  welcome.
+- Access to the container socket, normally `/var/run/docker.sock`
+- Disk for the backups: roughly the compressed size of your volumes × how many
+  snapshots you keep. A 47 MB PostgreSQL volume compresses to about 4 MB.
+- To build: Docker, or Go 1.24+
 
-```
-/backups/webapp/2026-08-13T14-22-05Z/
-├── manifest.json     image digest, archive list, sizes, SHA256 per archive
-├── spec.json         the untouched engine inspect response
-├── volumes/pgdata.tar.zst
-└── binds/_srv_webapp_data.tar.zst
-```
+> Mounting the Docker socket grants control of the engine, which is equivalent to
+> root on the host. That is true of Watchtower, Portainer and every other tool in
+> this category, but it is worth saying out loud.
 
-If backup-tower is gone, broken or incompatible, `tar --zstd -xf` still gets the
-data out. That property is worth more than any clever container format, and it
-is covered by a test that extracts an archive with the system `tar` binary.
+## Install
 
-## Usage
+There is no published image yet. Build it:
 
 ```sh
-backup-tower info                          # what engine am I talking to
-backup-tower plan                          # what would be acted on, and why
-backup-tower plan --explain webapp         # the full reasoning for one container
-backup-tower snapshot webapp               # snapshot, container keeps running
-backup-tower snapshot webapp --stop always # stop first for a consistent copy
-backup-tower snapshot webapp --binds       # include bind-mounted host paths
-backup-tower list                          # what has been stored
-backup-tower show webapp                   # details of the latest snapshot
-backup-tower verify webapp                 # re-check archives against their checksums
-
-backup-tower restore webapp                # put the data back
-backup-tower rollback webapp               # data, configuration and image together
-
-backup-tower update --dry-run              # what would be updated, per registry
-backup-tower update                        # update everything that opted in
-backup-tower update webapp                 # update exactly this one
-backup-tower daemon                        # keep checking on an interval
-
-backup-tower prune --dry-run               # what retention would delete
-backup-tower prune                         # apply it
+git clone https://github.com/Hudint/backup-tower.git
+cd backup-tower
+docker build -t backup-tower:latest .
 ```
 
-`verify` matters more than it looks: a backup that is never read is only a
-hypothesis.
+Or, if you would rather have a plain binary on the host:
 
-Restores replace, they do not merge — anything written since the snapshot is
-gone afterwards. Both commands print exactly what they are about to destroy and
-ask before doing it; `--yes` skips the question, and without a terminal they
-refuse rather than assume.
-
-Archives are checksummed before anything is written. A snapshot that does not
-match its manifest is refused, because a half-restored volume is worse than an
-untouched broken one.
-
-## Rollback
-
-`rollback` is the full way back after a bad update: it restores the archived
-data, recreates the container from its captured configuration, and puts it on
-the image it was running when the snapshot was taken.
-
-Three details make it hold up in practice:
-
-**The old image is pinned.** After an update the previous image loses its tag,
-which makes it fair game for `docker image prune`. Every snapshot tags it under
-`backup-tower/keep` so it survives for as long as the snapshot does. Without
-this the rollback path works right up until someone tidies up.
-
-**Runtime state is separated from configuration.** The engine's inspect response
-mixes the two, and handing the state back is how recreated containers end up
-subtly wrong — a hostname frozen to a dead container's ID, DNS aliases pointing
-at an ID that no longer exists, IP addresses already handed to someone else.
-
-**The old container is moved aside, not deleted.** It is only removed once its
-replacement exists; if anything fails in between, the original is put back under
-its own name. A rollback that leaves you with no container at all would be a
-worse failure than the one it was fixing.
-
-## Updating
-
-```
-check the registry → pull → hooks → stop → snapshot → replace → health gate
-                                                            ↓ failed
-                                                        roll back
+```sh
+go build -o backup-tower ./cmd/backup-tower
 ```
 
-**The check is on manifest digests, not tags.** A moving tag like `:latest` says
-nothing about whether the content changed, and pulling every image just to find
-out is expensive enough on a busy host that people turn updates off. The engine's
-own distribution endpoint answers the question without downloading anything.
+The binary is static and needs nothing at runtime. The container image is based
+on `docker:cli` because it also carries the compose plugin, which the compose
+update strategy shells out to.
 
-**The pull happens before the container is stopped**, so the download never counts
-as downtime. The container then goes down once — for the snapshot and the
-replacement together — which is what makes the consistent snapshot free.
+## First five minutes
 
-**Two strategies, chosen automatically.** A container that came from a compose
-file is updated with `docker compose up -d --no-deps`, which is what its owner
-would do by hand and what Komodo does when it redeploys. Everything else is
-recreated through the API. If the compose plugin or the compose file is not
-reachable, it falls back to the API path and says so rather than failing.
+Nothing is touched until you ask for it. Work through this and you end with a
+snapshot you have verified and unpacked yourself.
 
-**A subtlety that decides whether updates are correct at all.** The engine's
-inspect response does not distinguish what the operator asked for from what the
-image supplied — `CMD`, `ENTRYPOINT`, `HEALTHCHECK`, `ENV` and `LABEL` all look
-like they were requested. Recreating a container with that whole set pins the new
-release to the *old* image's defaults. A release that changes its entrypoint runs
-with the previous one, and — worst of all — a broken release passes the health
-gate, because the healthcheck being evaluated is the old version's. backup-tower
-therefore subtracts the old image's own defaults and keeps only what differs from
-them.
+**1. Check it can reach your engine.**
 
-### Health gate
+```sh
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+  backup-tower:latest info
+```
 
-If the image declares a `HEALTHCHECK`, that decides: the gate waits for healthy
-and fails on unhealthy. Whether a healthcheck exists is read from the
-configuration, not from whether the engine has populated the health state yet —
-right after a start it has not, and treating that moment as "no healthcheck"
-would let the weaker check decide a case the healthcheck was there to judge.
+```
+backup-tower  0.1.0
+engine        docker 29.4.3
+api           1.54
+host          unix:///var/run/docker.sock
+containers    144 total, 102 running
+```
 
-Without a healthcheck, the honest fallback is to watch for a crash loop over a
-settle window, and the result says exactly that: *health verified only by staying
-up*.
+**2. Ask what it would do.** On a fresh install the answer must be "nothing":
 
-### Rollback
+```sh
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+  -v /srv/backups:/backups backup-tower:latest plan
+```
 
-Automatic rollback is opt-in per container (`tower.rollback=true`). Undoing an
-update means restoring data and discarding whatever the new version wrote —
-right often enough to offer, not often enough to impose. When it is off, the
-failure message names the exact command to run.
+```
+Nothing selected. 102 containers were evaluated and none opted in.
+Set the label tower.enable=true on a container, or use a rule file, to enable it.
+```
 
-A rollback leaves the container on a **digest reference**, not a tag. The tag now
-points at the release that just failed, so resolving it would immediately undo
-the rollback; the next check reports `pinned to a digest` instead of quietly
-looping.
+**3. Snapshot one container by hand.** Pick something unimportant. `--stop always`
+stops it while its data is read, which is what makes the copy consistent; for a
+small volume that is a second or two.
 
-### Hooks
+```sh
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+  -v /srv/backups:/backups backup-tower:latest snapshot my-container --stop always
+```
 
-`tower.hook.pre-update`, `.pre-snapshot` and `.post-update` run as `sh -c` inside
-the container. Both pre-hooks run while the application is still up — pre-update
-first as the coarse "a change is coming" signal, then pre-snapshot, so a dump is
-taken with the application already quiesced.
+```
+my-container  2026-08-15T12-17-21Z
+  stopped at /backups/my-container/2026-08-15T12-17-21Z
+  volume   my-data                           3.7 MiB  (helper, 1334 files)
+  total 3.7 MiB in 1.4s
+```
 
-**A failing pre-hook aborts the update before the container is touched.** If the
-dump did not happen, the snapshot would look complete and not be.
+**4. Check it is intact.** `verify` re-reads every archive and compares it against
+the checksum recorded when it was written:
 
-## Scheduled backups
+```sh
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+  -v /srv/backups:/backups backup-tower:latest verify my-container
+```
 
-A container can be worth backing up nightly without ever being updated
-automatically, so the two are separate decisions. `tower.schedule` takes an
-ordinary cron expression; nothing else needs to be enabled.
+**5. Unpack it yourself, without this tool.** This is the step that matters.
+Look at what was written, then read one archive with plain `tar`:
+
+```sh
+sudo ls /srv/backups/my-container/
+# 2026-08-15T12-17-21Z
+
+sudo tar --zstd -tf /srv/backups/my-container/2026-08-15T12-17-21Z/volumes/my-data.tar.zst | head
+```
+
+If that lists your files, your backups are real. Everything else here is
+convenience on top of it.
+
+> Backups written from inside the container are owned by root with mode `0750`,
+> which is why `sudo` appears above. Name the snapshot directory rather than
+> using a `*` glob: your shell expands the glob before `sudo` takes effect, so it
+> cannot see inside a root-owned directory.
+
+## Running as a container
+
+This is the normal way to run it. See [`compose.example.yaml`](compose.example.yaml)
+for a complete, commented file; the essentials are:
 
 ```yaml
-labels:
-  tower.schedule: "0 4 * * *"
+services:
+  backup-tower:
+    image: backup-tower:latest
+    container_name: backup-tower
+    command: ["daemon"]
+    restart: unless-stopped
+    environment:
+      TOWER_BACKUP_DIR: /backups
+      TOWER_INTERVAL: 6h
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /srv/backups:/backups
+      - /opt:/opt:ro                 # your compose directories,
+      - /etc/komodo:/etc/komodo:ro   # at IDENTICAL paths — see below
 ```
 
-Scheduled backups read **hot** by default. Creating downtime on a timer is not a
-decision to make on the operator's behalf — `tower.snapshot.stop=always` asks for
-a consistent one and accepts the pause. A hot snapshot is crash-consistent, and
-the manifest records which it was so a restore can say so too.
+Two things about that file are not cosmetic.
 
-**The last run is read back from the backup store, not from a state file.** The
-snapshots already record when each one was taken and why, so a restarted daemon
-neither repeats a backup it just took nor silently skips one it owes — and there
-is no second source of truth to drift out of step with the first. A container
-with no history is not retroactively owed anything either: the first fire time is
-counted from when the daemon started.
+**Mount your compose directories at the same path they have on the host.**
+Compose creates containers on the host daemon but resolves relative paths against
+*our* filesystem, so a compose file mounted anywhere else silently produces
+containers with the wrong bind mounts. To list the directories you need:
 
-An invalid cron expression is reported by `plan` as a configuration problem. A
-schedule that never runs because of a typo is otherwise indistinguishable from
-one that was never set.
-
-## Retention
-
-A snapshot survives if it is among the most recent **N** *or* younger than **D**
-days. Both apply, which is what makes the pair useful: the count protects a
-rarely-updated container from ageing out entirely, the age protects a
-frequently-updated one from losing last week.
-
-**Snapshots taken by hand are never swept up automatically.** Someone who ran a
-snapshot before making a change did so precisely because they wanted it there
-afterwards; the policy that prunes routine automatic snapshots has no business
-overruling that. `--include-manual` overrides it.
-
-**Removing a snapshot releases the image it was holding.** This is the half that
-is easy to forget and expensive to skip: every update pins the image it replaced,
-so without it the image store grows by one image per update, forever — and
-`docker image prune` cannot help, because every one of them is tagged.
-
-Retention runs automatically after each scheduled backup and after each update
-pass. `backup-tower prune` applies it on demand, and always shows what it would
-remove before removing anything.
-
-A snapshot whose manifest cannot be read is never deleted. It may be the only
-record of something, and guessing is not worth the disk space.
-
-`prune` also releases pins whose snapshot went away by other means — a
-hand-deleted directory, a moved backup root. Those would otherwise stay forever
-and defeat the pruning the mechanism exists to survive.
-
-## Selecting containers
-
-**Automatic updates are opt-in.** Nothing is updated unless something says so,
-and there is no built-in blocklist: which containers are safe to update is the
-operator's decision, not the tool's.
-
-`plan` is how you check that before enabling anything. On a host with no labels
-set it must show nothing selected — and if it does not, that is exactly what you
-want to find out beforehand:
-
-```
-$ backup-tower plan
-CONTAINER      ACTION   STRATEGY  SNAPSHOT      SCHEDULE   ENABLED BY           NOTE
-webapp         update   compose   always+binds  -          label: tower.enable
-db             monitor  -         auto          0 4 * * *  rule: "the db"
-
-102 containers, 1 would be updated, 1 monitored only, 1 scheduled backups
+```sh
+docker ps -a --format '{{.Label "com.docker.compose.project.working_dir"}}' \
+  | grep . | sort -u
 ```
 
-`--all` lists everything including the containers that were not selected,
-`--explain <container>` prints the full reasoning for one of them.
+**Helper containers.** To read another container's volumes, backup-tower starts a
+short-lived helper from its own image. It works out which image that is by
+itself; set `TOWER_HELPER_IMAGE` only if you renamed or retagged it.
 
-Three sources feed the decision, in precedence order **label > rule file >
-default**. Labels win because they sit on the container itself.
+### Configuration
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `TOWER_BACKUP_DIR` | `/backups` | Where snapshots go. A bare path means a local directory. |
+| `TOWER_INTERVAL` | `6h` | How often the daemon checks for updates. |
+| `TOWER_RETENTION_KEEP` | `3` | Snapshots to keep per container. |
+| `TOWER_RETENTION_DAYS` | `14` | Keep anything younger than this, regardless of count. |
+| `TOWER_ZSTD_LEVEL` | `3` | Compression level 1–19. During an update this is downtime. |
+| `TOWER_CONCURRENCY` | `2` | Parallel snapshots. Disk throughput is the bottleneck. |
+| `TOWER_HELPER_IMAGE` | auto-detected | Image for helper containers. |
+| `TOWER_RULES_FILE` | — | Selection rules; most setups do not need one. |
+| `KOMODO_URL`, `_API_KEY`, `_API_SECRET` | — | Komodo as a selection and credential source. |
+| `KOMODO_TAG`, `KOMODO_SERVER` | — | Which tag opts in; which Komodo server this host is. |
+| `DOCKER_HOST` | platform default | Engine endpoint. |
+
+Logs go to the container's stderr — `docker logs backup-tower`. Add `-v` for
+detail.
+
+## Turning on automatic updates
+
+**Nothing is updated unless you say so.** There is no built-in blocklist: which
+containers are safe to update is your decision, not the tool's.
+
+Label a container to opt it in:
+
+```yaml
+services:
+  webapp:
+    labels:
+      tower.enable: "true"
+      tower.snapshot.stop: "always"  # consistent snapshot, brief downtime
+      tower.rollback: "true"         # undo automatically if it fails to start
+```
 
 ### Labels
 
 | Label | Default | Meaning |
 |---|---|---|
 | `tower.enable` | `false` | Opt in to automatic updates |
-| `tower.monitor-only` | `false` | Report available updates without applying them |
+| `tower.monitor-only` | `false` | Report available updates, apply none |
 | `tower.snapshot` | `true` | Snapshot before updating |
+| `tower.snapshot.stop` | `auto` | `always` (consistent), `never` (no downtime), `auto` (stop only during updates) |
 | `tower.snapshot.binds` | `false` | Include bind-mounted host paths |
-| `tower.snapshot.stop` | `auto` | `auto`, `always` or `never` |
 | `tower.schedule` | — | Cron expression for backups independent of updates |
 | `tower.retention.keep` / `.days` | `3` / `14` | Retention override |
-| `tower.rollback` | `false` | Undo automatically when the health gate fails |
+| `tower.rollback` | `false` | Undo automatically when the health check fails |
 | `tower.strategy` | `auto` | `auto`, `compose` or `recreate` |
-| `tower.hook.pre-snapshot` / `.pre-update` / `.post-update` | — | Command run inside the container |
+| `tower.hook.pre-update` | — | Command run in the container before the update |
+| `tower.hook.pre-snapshot` | — | Command run before the snapshot — a `pg_dump`, say |
+| `tower.hook.post-update` | — | Command run once the replacement is healthy |
 
-Only the `tower.*` namespace is read. Labels belonging to other tools —
-Watchtower's in particular — are deliberately ignored: acting on them would mean
-touching containers that were marked for something else.
+Only the `tower.*` namespace is read; other tools' labels are ignored on purpose.
+A misspelled `tower.*` label is reported as a problem rather than silently doing
+nothing.
 
-A misspelled `tower.*` label is reported as a problem rather than ignored. A typo
-in the label that was meant to enable or protect a container otherwise stays
-invisible until it matters.
+### Then check, twice
+
+```sh
+backup-tower plan                  # who is selected, and why
+backup-tower plan --explain webapp # the full reasoning for one container
+backup-tower update --dry-run      # what would actually be updated right now
+```
+
+```
+CONTAINER  ACTION   STRATEGY  SNAPSHOT      ENABLED BY
+webapp     update   compose   always+binds  label: tower.enable
+db         monitor  -         auto          rule: "watch the databases"
+
+102 containers, 1 would be updated, 1 monitored only, 0 scheduled backups
+```
+
+`plan --all` lists everything, including what was *not* selected and why.
+
+### Then let it run
+
+```sh
+backup-tower update              # once, now, everything that opted in
+backup-tower daemon --once       # one full pass, then exit
+backup-tower daemon              # keep going on the interval
+```
+
+`daemon` waits a full interval before its first pass, so starting it changes
+nothing immediately. `--run-now` overrides that.
+
+### What happens during an update
+
+The image is pulled while the container is still serving, so the download is not
+part of the downtime. Then the container is stopped once — for the snapshot and
+the replacement together.
+
+Containers that came from a compose file are updated with
+`docker compose up -d --no-deps`, which is what you would do by hand. Everything
+else is recreated through the API. If the compose plugin or the compose file is
+not reachable, it falls back and says so rather than failing.
+
+Recreated containers keep only your explicit settings, so the new image's own
+entrypoint, environment and healthcheck apply.
+
+**Afterwards it checks the container actually came up.** If the image declares a
+`HEALTHCHECK`, that decides. If it does not, the container must simply stay up
+for the settle window (15s), and the result says so plainly: *health verified only
+by staying up*.
+
+---
+
+## Recovery
+
+Something broke. Here is what to do.
+
+### 1. Find the snapshot
+
+```sh
+backup-tower list webapp
+```
+
+```
+CONTAINER  SNAPSHOT              AGE       TRIGGER  STATE    ARCHIVES  SIZE
+webapp     2026-08-13T04-00-11Z  2d        update   stopped  1         3.7 MiB
+webapp     2026-08-15T12-17-21Z  just now  update   stopped  1         3.7 MiB
+```
+
+`STATE` is `stopped` for a consistent copy, `hot` for a crash-consistent one.
+`backup-tower show webapp <snapshot>` prints the full detail.
+
+### 2. Roll back
+
+```sh
+backup-tower rollback webapp                       # to the latest snapshot
+backup-tower rollback webapp 2026-08-13T04-00-11Z  # to a specific one
+```
+
+This restores the data, recreates the container from its captured configuration,
+and puts it back on the image it was running at the time. It prints exactly what
+it is about to replace and asks before doing it. In a script, pass `--yes`;
+without a terminal it refuses rather than assuming.
+
+To put back only the data and leave the container alone, use `restore` instead.
+
+> **Restores replace, they do not merge.** Anything written since the snapshot is
+> gone afterwards. That is the point, but check the snapshot's age first.
+
+Archives are checksummed before anything is written. A snapshot that does not
+match its manifest is refused — a half-restored volume is worse than an untouched
+broken one. If you would rather have damaged data than none, `--skip-verify`
+overrides that.
+
+### 3. If the rollback also fails
+
+The snapshot is still intact; nothing about a failed rollback damages it. The
+original container is put back under its own name if the replacement could not be
+created, so you are never left with no container at all.
+
+To get at the data directly, without this tool:
+
+```sh
+sudo ls /srv/backups/webapp/                 # the snapshot directories
+sudo ls /srv/backups/webapp/<snapshot>/volumes/   # the archives in one of them
+
+mkdir /tmp/recovered
+sudo tar --zstd -xf /srv/backups/webapp/<snapshot>/volumes/<name>.tar.zst -C /tmp/recovered
+```
+
+`spec.json` in the same directory is the container's full configuration as the
+engine reported it.
+
+### After a rollback
+
+The container is left on a **digest reference** rather than a tag, and the next
+check reports `pinned to a digest`. That is deliberate: the tag now points at the
+release that just failed, so following it would immediately undo your rollback.
+Re-point it at a tag once you have a fixed release.
+
+---
+
+## Scheduled backups
+
+A container can be worth backing up nightly without ever being updated
+automatically, so the two are separate. `tower.schedule` takes an ordinary cron
+expression and needs nothing else enabled:
+
+```yaml
+labels:
+  tower.schedule: "0 4 * * *"
+```
+
+Scheduled backups read **hot** by default — creating downtime on a timer is not a
+decision the tool should make for you. Add `tower.snapshot.stop: "always"` if you
+want a consistent copy and can accept the pause.
+
+An invalid cron expression is reported by `plan` as a problem. A schedule that
+never runs because of a typo is otherwise indistinguishable from one that was
+never set.
+
+## Retention and disk usage
+
+A snapshot survives if it is among the most recent **N** *or* younger than **D**
+days. Both apply: the count protects a rarely-updated container from ageing out
+entirely, the age protects a busy one from losing last week.
+
+```sh
+backup-tower prune --dry-run   # what would go
+backup-tower prune             # apply it
+```
+
+Retention also runs automatically after each scheduled backup and each update
+pass.
+
+**Snapshots you took by hand are never swept up automatically** — you took one
+before making a change because you wanted it afterwards. `--include-manual`
+overrides that.
+
+Every update tags the image it replaced under `backup-tower/keep` so
+`docker image prune` cannot remove it while a snapshot still needs it. `prune`
+releases those tags along with the snapshots, including any left behind by a
+snapshot directory that was deleted by other means.
+
+## Selection in depth
+
+Beyond labels, two other sources can select containers. Precedence is
+**label > Komodo tag > rule file > default** — the more specific wins.
 
 ### Rule file
 
-For what labels cannot reach. See [`rules.example.yaml`](rules.example.yaml);
-point `TOWER_RULES_FILE` at your copy. Rules are applied in order and later
-matches override earlier ones, so broad-first, specific-last works naturally.
-Unknown keys are rejected at load time.
+For containers whose compose file you would rather not touch. See
+[`rules.example.yaml`](rules.example.yaml); point `TOWER_RULES_FILE` at your copy.
+Rules apply in order and later matches override earlier ones, so write them
+broad-first, specific-last. Unknown keys are rejected when the file is loaded.
 
 ### Komodo
 
-Komodo is used purely as an additional selection source: it answers "which stacks
-did the operator tag", and nothing else. Updates still go through the normal
-path, which keeps the coupling to a single read call.
-
-Tagged stacks resolve to local containers through their compose project name,
-tagged deployments through their container name. Komodo manages several hosts
-while backup-tower only sees its own, so set `KOMODO_SERVER` when a tag spans
-more than one — without it you get a warning rather than a guess.
-
-**Tags can carry the whole policy, not just membership.** Map tag names to
-settings in the rule file and a stack is configured by tagging it in the Komodo
-UI — no compose file to edit, no redeploy to schedule:
+If you run [Komodo](https://komo.do), it can drive the whole policy. Map tag names
+to settings in the rule file, then tag a stack in the Komodo UI — no compose file
+to edit, no redeploy:
 
 ```yaml
 komodo_tags:
@@ -311,84 +421,110 @@ komodo_tags:
     set: {rollback: true}
 ```
 
-`KOMODO_TAG` remains the simple case and sets nothing but `enable`. It marks
-membership, so it must not override a deliberate watch-only rule elsewhere.
+Tagged stacks resolve to local containers through their compose project name,
+tagged deployments through their container name. Komodo manages several hosts
+while backup-tower sees only its own, so set `KOMODO_SERVER` to this host's Komodo
+server name — without it you get a warning rather than a guess.
+
+Komodo also holds registry credentials for the images its stacks pull, and those
+never reach the host's docker configuration. backup-tower reads them, which is
+often the difference between a private image being checkable and not. Works with
+Komodo 2.2 and newer.
+
+If Komodo's auto-update is on for a stack you hand to backup-tower, turn it off.
+Otherwise Komodo may update it first, without a snapshot, and the guarantee is
+void.
 
 ### Registry credentials
 
-Private images need credentials for the digest check and the pull. Two sources
-are used, and both are tried in turn rather than ranked — credentials are
-per-registry, not per-container, so any precedence rule would be a guess:
-
-1. **This host's `docker login`** (`~/.docker/config.json`, or `DOCKER_CONFIG`).
-2. **Komodo's registry accounts**, when Komodo is configured.
-
-The second matters because images belonging to Komodo-managed stacks are pulled
-by Komodo's periphery agent, which logs in *inside its own container*. None of
-that reaches the host's docker configuration, so those images look simply
-unreachable from here.
-
-Komodo does hand out the tokens (verified against 2.2.0 and 2.3.2). It renamed
-the request in v2.3.0, so both names are tried — pinning either one means the
-tool silently stops finding credentials on one side of that boundary. If an
-account ever does come back without a secret, backup-tower says so specifically
-rather than reporting a bare authentication failure that sends you looking in
-the wrong place.
-
-Credential helpers (`credsStore` in config.json) cannot be called by this build,
-and are reported as such.
+Private images need credentials for the digest check and the pull. Two sources are
+used, and both are tried in turn: this host's `docker login`
+(`~/.docker/config.json`, or `DOCKER_CONFIG`), and Komodo's registry accounts.
 
 ### What cannot be updated
 
 Containers on locally built images have no registry to check, and containers
-referencing an image only by ID have no name left to resolve. Both are reported
-as such and skipped rather than failing on every run. Snapshots still work for
-them.
+referencing an image only by id have no name left to resolve. Both are reported as
+such and skipped rather than failing on every run. Snapshots still work for them.
 
-## Configuration
+## Command reference
 
-| Variable | Default | Meaning |
-|---|---|---|
-| `TOWER_BACKUP_DIR` | `/backups` | Destination. A bare path means a local directory. |
-| `TOWER_HELPER_IMAGE` | — | Image for helper containers; required when volumes are not directly readable. |
-| `TOWER_ZSTD_LEVEL` | `3` | Compression level. During an update, compression time is downtime. |
-| `TOWER_CONCURRENCY` | `2` | Parallel snapshots. Disk throughput is the bottleneck. |
-| `TOWER_RETENTION_KEEP` | `3` | Snapshots to keep per container. |
-| `TOWER_RETENTION_DAYS` | `14` | Minimum age to keep. |
-| `TOWER_INTERVAL` | `6h` | Update check interval. |
-| `TOWER_RULES_FILE` | — | Selection rules; absent is the normal case. |
-| `KOMODO_URL` / `_API_KEY` / `_API_SECRET` / `_TAG` | — | Komodo as a selection source; all four required. |
-| `KOMODO_SERVER` | — | Restrict to one Komodo server on multi-host setups. |
-| `DOCKER_HOST` | platform default | Engine endpoint. |
+| Command | What it does |
+|---|---|
+| `info` | Which engine, which version, how many containers |
+| `plan` | What would be acted on, and why. `--all`, `--explain <container>`, `--check` |
+| `snapshot <container>` | Snapshot now. `--stop always\|never\|auto`, `--binds`, `--level N` |
+| `list [container]` | Stored snapshots |
+| `show <container> [snapshot]` | One snapshot in detail |
+| `verify <container> [snapshot]` | Re-check archives against their checksums |
+| `restore <container> [snapshot]` | Put data back. `--config`, `--image`, `--binds`, `--no-start`, `--skip-verify`, `--yes` |
+| `rollback <container> [snapshot]` | Data, configuration and image together. `--yes` |
+| `update [container...]` | Update. `--dry-run`, `--force`, `--settle`, `--health-timeout`, `--no-health-check` |
+| `daemon` | Keep checking. `--once`, `--run-now`, `--interval` |
+| `prune [container...]` | Apply retention. `--dry-run`, `--keep N`, `--days N`, `--include-manual`, `--yes` |
 
-## How volumes are read
+Global: `--backup-dir <path>`, `-v`/`--verbose`. Omitting `[snapshot]` means the
+most recent one.
 
-A container cannot add mounts after it has started, so backup-tower running in a
-container cannot mount foreign volumes into itself. It starts a short-lived
-helper container instead — using **its own image**, because Go does tar and zstd
-natively. No Alpine, no shell pipes, no external binaries, and the same
-archiving code on both sides.
+## Troubleshooting
 
-When the volume path is directly readable — running on the engine host with
-sufficient rights — that faster path is used automatically.
+**`cannot reach volume X directly and no helper image is configured`**
+backup-tower could not work out its own image. Set `TOWER_HELPER_IMAGE` to the
+image you built.
 
-## Running as a container
+**`permission denied while trying to connect to the Docker daemon socket`**
+Run as root, or add your user to the `docker` group. In a container, check the
+socket is actually mounted.
 
-See [`compose.example.yaml`](compose.example.yaml) for a complete file. Two
-things about it are not cosmetic:
+**`the registry needs credentials`**
+The image is private. Run `docker login <registry>` on the host, or let Komodo
+supply the credentials.
 
-**Compose directories must be mounted at an identical path.** Compose creates
-containers on the host daemon but resolves relative paths against *our*
-filesystem, so a compose file mounted anywhere else silently produces containers
-with the wrong bind mounts.
+**`the registry needs credentials that are stored in a credential helper`**
+`credsStore` is set in `~/.docker/config.json` — common with Docker Desktop — and
+this build cannot call external credential helpers. Use a config with plain
+`auths` entries, or supply the credentials through Komodo.
 
-**`TOWER_HELPER_IMAGE` must name this same image.** backup-tower starts itself to
-reach volumes it cannot mount into an already-running container; without it, only
-directly readable volumes work.
+**`skipped: pinned to a digest`**
+Normal after a rollback, and deliberate. See [After a rollback](#after-a-rollback).
 
-Backups written from inside the container are owned by root with mode `0750`, so
-reading them from the host needs root — or another container, which is how you
-would restore them anyway.
+**`the compose plugin is not available here`**
+It fell back to recreating the container through the API. Harmless, but a
+compose-managed container is better updated by compose — use an image that has
+the plugin.
+
+**`update failed and was rolled back`**
+Working as intended: the new release did not come up and the previous one is back.
+`docker logs <container>` will say why it did not.
+
+**`unknown label tower.xyz`**
+A typo. Nothing was applied from that label.
+
+**A snapshot takes much longer than the volume size suggests.**
+Containers that ignore `SIGTERM` take the full stop timeout — 10 seconds by
+default — before being killed, and for small volumes that dominates the downtime.
+
+## Uninstall
+
+```sh
+docker rm -f backup-tower
+
+# Release the images it was holding on to for rollbacks.
+docker images 'backup-tower/keep' --format '{{.Repository}}:{{.Tag}}' \
+  | xargs -r -n1 docker rmi
+
+docker rmi backup-tower:latest
+```
+
+Some of those may report *"must force — container X is using its referenced
+image"*. That is harmless: it means a container still runs on that image, so the
+tag is all that would have gone anyway. Remove those with `docker rmi -f` once
+nothing uses them.
+
+Your backups in `TOWER_BACKUP_DIR` are plain files and are untouched by any of
+this. Delete them yourself when you no longer want them, and remove the `tower.*`
+labels from your compose files so nothing is left pointing at a tool that is no
+longer there.
 
 ## Development
 
@@ -400,7 +536,30 @@ docker build -t backup-tower:dev .
 
 The test stack covers the shapes that behave differently: a database in a named
 volume, a bind-mounted host directory, a container with no storage at all, and
-services with and without a `HEALTHCHECK`. Nothing publishes a port, so it
-cannot collide with anything already running.
+services with and without a `HEALTHCHECK`. Nothing publishes a port, so it cannot
+collide with anything already running.
 
 Never develop against production containers.
+
+## Storage format
+
+```
+/backups/webapp/2026-08-13T14-22-05Z/
+├── manifest.json     image digest, archive list, sizes, SHA256 per archive
+├── spec.json         the untouched engine inspect response
+├── volumes/pgdata.tar.zst
+└── binds/_srv_webapp_data.tar.zst
+```
+
+Snapshot directories are named by UTC timestamp, so they sort chronologically.
+
+## Not in scope
+
+restic and remote backup targets, notifications, writable-layer snapshots, and the
+Podman quadlet path. The events a notifier would need already run through one
+place.
+
+## Why it works this way
+
+[DESIGN.md](DESIGN.md) — the reasoning behind the decisions above, most of which
+was paid for with a bug.

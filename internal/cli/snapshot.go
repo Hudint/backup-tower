@@ -69,7 +69,10 @@ func newSnapshotCmd() *cobra.Command {
 	}
 
 	cmd.Flags().BoolVar(&includeBinds, "binds", false, "archive bind-mounted host paths as well")
-	cmd.Flags().StringVar(&stopPolicy, "stop", "never", "stop the container while reading: auto, always or never")
+	// "auto" matches the tower.snapshot.stop label default. For a snapshot taken
+	// by hand it behaves exactly like "never" — auto only stops during an
+	// update — so this aligns the two names without changing what happens.
+	cmd.Flags().StringVar(&stopPolicy, "stop", "auto", "stop the container while reading: auto, always or never")
 	cmd.Flags().IntVar(&level, "level", 0, "zstd compression level (default from configuration)")
 	cmd.Flags().BoolVar(&forceHelper, "helper", false, "always read volumes through a helper container")
 	return cmd
