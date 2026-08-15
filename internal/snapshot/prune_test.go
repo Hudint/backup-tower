@@ -211,3 +211,44 @@ func TestUnreadableSnapshotsAreNeverDeleted(t *testing.T) {
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
 }
+
+// Zero switches one half of the policy off. The two numbers are OR'd, so a
+// snapshot survives if it is recent enough *or* young enough — which means
+// leaving one at zero is how you say "judge on the other alone".
+func TestZeroDaysMeansCountOnly(t *testing.T) {
+	st := newStore(t)
+	// Two of these are far older than any plausible age limit.
+	writeSnapshot(t, st, "app", 400*24*time.Hour, TriggerUpdate, "")
+	writeSnapshot(t, st, "app", 200*24*time.Hour, TriggerUpdate, "")
+	newest := writeSnapshot(t, st, "app", time.Hour, TriggerUpdate, "")
+
+	p := NewPruner(st, nil, testLogger())
+	if _, err := p.Prune(context.Background(), "app", Retention{Keep: 2, Days: 0}, false); err != nil {
+		t.Fatal(err)
+	}
+
+	got := kept(t, st, "app")
+	if len(got) != 2 {
+		t.Fatalf("kept %d snapshots, want exactly the 2 most recent: %v", len(got), got)
+	}
+	if got[len(got)-1] != newest {
+		t.Errorf("the newest snapshot was not kept: %v", got)
+	}
+}
+
+func TestZeroKeepMeansAgeOnly(t *testing.T) {
+	st := newStore(t)
+	writeSnapshot(t, st, "app", 40*24*time.Hour, TriggerUpdate, "")
+	young1 := writeSnapshot(t, st, "app", 2*24*time.Hour, TriggerUpdate, "")
+	young2 := writeSnapshot(t, st, "app", time.Hour, TriggerUpdate, "")
+
+	p := NewPruner(st, nil, testLogger())
+	if _, err := p.Prune(context.Background(), "app", Retention{Keep: 0, Days: 7}, false); err != nil {
+		t.Fatal(err)
+	}
+
+	got := kept(t, st, "app")
+	if len(got) != 2 || got[0] != young1 || got[1] != young2 {
+		t.Errorf("kept %v, want only the two younger than 7 days", got)
+	}
+}

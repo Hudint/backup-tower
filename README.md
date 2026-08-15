@@ -270,6 +270,22 @@ backup-tower daemon              # keep going on the interval
 `daemon` waits a full interval before its first pass, so starting it changes
 nothing immediately. `--run-now` overrides that.
 
+**Why the interval defaults to 6 hours.** Not because checking is expensive. A
+pass asks each registry for a manifest digest and downloads nothing, which is
+cheap enough that Docker Hub does not even count it against your pull limit.
+
+It is the *update* that is expensive. Finding a new digest here means stopping
+the container, archiving every volume it owns and waiting out a health gate —
+seconds to minutes of downtime, and a snapshot on disk. That is not something to
+trigger four minutes after a release rather than four hours after it, and a
+shorter interval buys nothing but a narrower window in which you are running the
+old version. Watchtower defaults to 24 hours; 6 is already four times that.
+
+Set `TOWER_INTERVAL` to whatever suits your setup — `30m` is perfectly sensible
+for a handful of containers you want to follow closely. The 30-second figure that
+turns up in Watchtower tutorials is a demo setting, so the writer does not have
+to wait around.
+
 ### What happens during an update
 
 The image is pulled while the container is still serving, so the download is not
@@ -384,6 +400,25 @@ never set.
 A snapshot survives if it is among the most recent **N** *or* younger than **D**
 days. Both apply: the count protects a rarely-updated container from ageing out
 entirely, the age protects a busy one from losing last week.
+
+**Set one of them to `0` to switch it off** and judge on the other alone:
+
+| | `keep` | `days` | Result |
+|---|---|---|---|
+| Count only | `5` | `0` | The last 5, however old they get |
+| Age only | `0` | `30` | Everything from the last 30 days, however many |
+| Both (default) | `3` | `14` | The last 3, plus anything younger than 14 days |
+
+Not a negative number and not an empty value — `0` means "this half has no
+opinion". Both at zero is refused when the configuration is read, because it
+would delete every backup you have.
+
+```yaml
+# rule file                          # or as labels on the container
+set:                                 #   tower.retention.keep: "5"
+  retention_keep: 5                  #   tower.retention.days: "0"
+  retention_days: 0
+```
 
 ```sh
 backup-tower prune --dry-run   # what would go
