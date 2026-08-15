@@ -118,6 +118,11 @@ jobs:
       # The image is its own helper container, so a broken entrypoint would only
       # surface at the first snapshot. Running it once here is the cheapest
       # possible check that the thing that was just published actually starts.
+      # Pull the reference out of the tag list rather than rebuilding it here.
+      # The owner is spelled "Hudint" and image references must be lowercase, so
+      # anything reassembled by hand is a second place for that to go wrong.
       - name: Smoke-test the published image
         run: |
-          docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }} --version
+          ref=$(printf '%s\n' "${{ steps.meta.outputs.tags }}" | head -n1)
+          echo "testing $ref"
+          docker run --rm "$ref" --version
