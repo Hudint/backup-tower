@@ -1,0 +1,123 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+# A newer push to the same branch makes an in-flight run obsolete. Tags are
+# excluded: a release build must never be cancelled by whatever lands next.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -race ./...
+
+      # The storage format rests on one promise: the archives can be read with
+      # ordinary tools. Its test skips itself when the runner's tar cannot do
+      # zstd — and a silently skipped guarantee is worth no more than a missing
+      # one, so the skip is treated as a failure here.
+      - name: Confirm archives are readable by system tar
+        run: |
+          out=$(go test -run TestArchiveReadableByStandardTar -v ./internal/snapshot/archive/)
+          echo "$out"
+          if echo "$out" | grep -q -- '--- SKIP'; then
+            echo "::error::the system-tar compatibility test skipped instead of running"
+            exit 1
+          fi
+
+  image:
+    name: Image
+    needs: test
+    # Never publish an image built from code that did not pass its own tests.
+    # Pull requests build to prove the Dockerfile still works, and stop there:
+    # a fork must not be able to push to the registry.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # Nothing in the target-platform stage runs a command — it only copies the
+      # cross-compiled binary in — so emulation is not on the critical path.
+      # It is set up anyway so adding a RUN there later fails loudly, not weirdly.
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ${{ env.REGISTRY }}
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Work out tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # A push to main publishes :main and :sha-<short>. A v* tag publishes
+          # the full version, the major.minor line, and moves :latest — so
+          # :latest only ever names a release, never the tip of the branch.
+          tags: |
+            type=ref,event=branch
+            type=sha,format=short
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+          labels: |
+            org.opencontainers.image.title=backup-tower
+            org.opencontainers.image.description=Automatic container updates that snapshot volumes and configuration first
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # The image is its own helper container, so a broken entrypoint would only
+      # surface at the first snapshot. Running it once here is the cheapest
+      # possible check that the thing that was just published actually starts.
+      - name: Smoke-test the published image
+        run: |
+          docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }} --version

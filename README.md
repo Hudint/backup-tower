@@ -1,5 +1,8 @@
 # backup-tower
 
+[![CI](https://github.com/Hudint/backup-tower/actions/workflows/ci.yml/badge.svg)](https://github.com/Hudint/backup-tower/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 **Automatic Docker container updates that keep a way back.** Like Watchtower, but
 it snapshots your volumes and configuration before every update — so a bad
 release can be undone.
@@ -25,8 +28,7 @@ binary so that cannot quietly stop being true.
 
 > **An update broke something?** Jump to [Recovery](#recovery).
 
-Feature complete, pre-1.0. Docker on Linux. No published image yet —
-you build it, in one command, below.
+Feature complete, pre-1.0. Docker on Linux, amd64 and arm64.
 
 ---
 
@@ -46,12 +48,20 @@ you build it, in one command, below.
 
 ## Install
 
-There is no published image yet. Build it:
+```sh
+docker pull ghcr.io/hudint/backup-tower:latest
+```
+
+`:latest` is the newest release. `:main` is the tip of the branch, and every
+build is also tagged with its version and its commit — pin one of those if you
+would rather decide for yourself when to move.
+
+Or build it yourself:
 
 ```sh
 git clone https://github.com/Hudint/backup-tower.git
 cd backup-tower
-docker build -t backup-tower:latest .
+docker build -t ghcr.io/hudint/backup-tower:latest .
 ```
 
 Or, if you would rather have a plain binary on the host:
@@ -73,7 +83,7 @@ snapshot you have verified and unpacked yourself.
 
 ```sh
 docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
-  backup-tower:latest info
+  ghcr.io/hudint/backup-tower:latest info
 ```
 
 ```
@@ -88,7 +98,7 @@ containers    144 total, 102 running
 
 ```sh
 docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
-  -v /srv/backups:/backups backup-tower:latest plan
+  -v /srv/backups:/backups ghcr.io/hudint/backup-tower:latest plan
 ```
 
 ```
@@ -102,7 +112,7 @@ small volume that is a second or two.
 
 ```sh
 docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
-  -v /srv/backups:/backups backup-tower:latest snapshot my-container --stop always
+  -v /srv/backups:/backups ghcr.io/hudint/backup-tower:latest snapshot my-container --stop always
 ```
 
 ```
@@ -117,7 +127,7 @@ the checksum recorded when it was written:
 
 ```sh
 docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
-  -v /srv/backups:/backups backup-tower:latest verify my-container
+  -v /srv/backups:/backups ghcr.io/hudint/backup-tower:latest verify my-container
 ```
 
 **5. Unpack it yourself, without this tool.** This is the step that matters.
@@ -146,7 +156,7 @@ for a complete, commented file; the essentials are:
 ```yaml
 services:
   backup-tower:
-    image: backup-tower:latest
+    image: ghcr.io/hudint/backup-tower:latest
     container_name: backup-tower
     command: ["daemon"]
     restart: unless-stopped
@@ -513,7 +523,7 @@ docker rm -f backup-tower
 docker images 'backup-tower/keep' --format '{{.Repository}}:{{.Tag}}' \
   | xargs -r -n1 docker rmi
 
-docker rmi backup-tower:latest
+docker rmi ghcr.io/hudint/backup-tower:latest
 ```
 
 Some of those may report *"must force — container X is using its referenced
@@ -540,6 +550,12 @@ services with and without a `HEALTHCHECK`. Nothing publishes a port, so it canno
 collide with anything already running.
 
 Never develop against production containers.
+
+Every push runs the same checks in GitHub Actions — `gofmt`, `go vet`, the test
+suite under the race detector — and only then builds the image for amd64 and
+arm64 and pushes it to `ghcr.io`. Pull requests build the image to prove the
+Dockerfile still works, but never publish it. Tagging a commit `v1.2.3` is what
+produces a release and moves `:latest`.
 
 ## Storage format
 

@@ -6,7 +6,7 @@
 
 services:
   backup-tower:
-    image: backup-tower:dev
+    image: ghcr.io/hudint/backup-tower:latest
     container_name: backup-tower
     command: ["daemon"]
     restart: unless-stopped
@@ -15,10 +15,11 @@ services:
       # Where snapshots go, as seen from inside this container.
       TOWER_BACKUP_DIR: /backups
 
-      # The image used for helper containers. It must be this same image:
-      # backup-tower starts itself to reach volumes it cannot mount into a
-      # running container. Without this, only directly readable volumes work.
-      TOWER_HELPER_IMAGE: backup-tower:dev
+      # The image used for helper containers. backup-tower starts itself to
+      # reach volumes it cannot mount into an already-running container, and
+      # works out which image that is on its own — so this only needs setting if
+      # you renamed or retagged it.
+      # TOWER_HELPER_IMAGE: ghcr.io/hudint/backup-tower:latest
 
       # How often to check for updates.
       TOWER_INTERVAL: 6h

@@ -1,5 +1,7 @@
 .git
+.github
 .gitignore
+LICENSE
 test/tower-test/data
 *.md
 Dockerfile
