@@ -1,6 +1,12 @@
 package runtime
 
 import (
+	"context"
+	"errors"
+	"sync"
+	"sync/atomic"
+	"time"
+
 	"os"
 	"path/filepath"
 	"testing"
@@ -115,5 +121,73 @@ func TestDigestForRepoPicksTheMatchingRepository(t *testing.T) {
 	// Familiar and normalised names must match each other.
 	if got := DigestForRepo("postgres:17", []string{"postgres@sha256:cccc"}); got != "sha256:cccc" {
 		t.Errorf("DigestForRepo = %q for a familiar name, want sha256:cccc", got)
+	}
+}
+
+// Every caller must learn that the fallback holds credentials, not just the one
+// that happened to fetch them.
+//
+// sync.Once runs its function for the first caller only; the rest wait and
+// carry on. Reporting "nothing was added" to those callers sent them away from
+// credentials sitting right there — which showed up as one container per daemon
+// start failing with "unauthorized", and only ever on the first pass, because
+// by the second the credentials were already in place. Sequential checks never
+// exposed it; concurrent ones do, since they all reach the fallback before any
+// of them has stored anything.
+func TestEveryConcurrentCallerSeesTheLoadedCredentials(t *testing.T) {
+	var loads atomic.Int32
+
+	auth := &RegistryAuth{}
+	auth.SetFallback("test", func(ctx context.Context) ([]Credential, string, error) {
+		loads.Add(1)
+		// Hold the others inside Once.Do, which is the situation being tested.
+		time.Sleep(50 * time.Millisecond)
+		return []Credential{{Domain: "ghcr.io", Username: "u", Token: "t"}}, "loaded", nil
+	})
+
+	const callers = 8
+	results := make([]bool, callers)
+	var wg sync.WaitGroup
+	for i := range callers {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			added, err := auth.LoadFallback(context.Background())
+			if err != nil {
+				t.Errorf("caller %d: %v", i, err)
+			}
+			results[i] = added
+		}(i)
+	}
+	wg.Wait()
+
+	if n := loads.Load(); n != 1 {
+		t.Errorf("the fallback source was consulted %d times, want exactly 1", n)
+	}
+	for i, added := range results {
+		if !added {
+			t.Errorf("caller %d was told no credentials were added, and would have given up on a registry it could have reached", i)
+		}
+	}
+
+	// And the credentials really are usable afterwards.
+	if got := len(auth.Attempts("ghcr.io/hudint/app:latest")); got != 2 {
+		t.Errorf("got %d attempts, want the fallback credential plus anonymous", got)
+	}
+}
+
+// A fallback that fails must not be reported as having supplied anything.
+func TestAFailedFallbackAddsNothing(t *testing.T) {
+	auth := &RegistryAuth{}
+	auth.SetFallback("test", func(ctx context.Context) ([]Credential, string, error) {
+		return nil, "unreachable", errors.New("boom")
+	})
+
+	added, err := auth.LoadFallback(context.Background())
+	if err == nil {
+		t.Error("the failure was swallowed")
+	}
+	if added {
+		t.Error("a failed fallback reported that it added credentials")
 	}
 }

@@ -48,9 +48,10 @@ type RegistryAuth struct {
 	// Checks run concurrently, so one goroutine may be loading credentials
 	// while another is reading them; byRegistry is not covered because it is
 	// filled before the value is handed out and never written again.
-	mu           sync.RWMutex
-	fallbackErr  error
-	fallbackNote string
+	mu            sync.RWMutex
+	fallbackErr   error
+	fallbackNote  string
+	fallbackAdded bool
 }
 
 // Credential is one set of registry credentials from a fallback source.
@@ -86,27 +87,34 @@ func (a *RegistryAuth) LoadFallback(ctx context.Context) (bool, error) {
 	if a == nil || a.fallback == nil {
 		return false, nil
 	}
-	var added bool
 	a.fallbackOnce.Do(func() {
 		creds, note, err := a.fallback.load(ctx)
+
+		// AddCredentials takes the lock itself, so it must be called before we
+		// take it here.
+		var added bool
+		if err == nil {
+			for _, c := range creds {
+				a.AddCredentials(a.fallback.name, c.Domain, c.Username, c.Token)
+				added = true
+			}
+		}
 
 		a.mu.Lock()
 		a.fallbackNote = note
 		a.fallbackErr = err
+		a.fallbackAdded = added
 		a.mu.Unlock()
-
-		if err != nil {
-			return
-		}
-		for _, c := range creds {
-			a.AddCredentials(a.fallback.name, c.Domain, c.Username, c.Token)
-			added = true
-		}
 	})
 
+	// Report what the fallback holds, not what this particular call did. Only
+	// one caller ever runs the closure; every other one waits for it and then
+	// finds the credentials already in place, and telling those callers that
+	// nothing was added would send them away from credentials that are sitting
+	// right there.
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	return added, a.fallbackErr
+	return a.fallbackAdded, a.fallbackErr
 }
 
 // FallbackName reports the name of the lazy source, empty when there is none.
