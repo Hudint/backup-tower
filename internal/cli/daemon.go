@@ -283,6 +283,24 @@ func scheduledBackups(cmd *cobra.Command, e *env, scheduler *schedule.Checker, f
 			continue
 		}
 
+		// The pre-snapshot hook is where a database dump lives. Without it a
+		// scheduled backup of a database container holds the files and an old
+		// dump, which looks complete and is not — so a failed hook skips the
+		// backup and says so, exactly as it aborts an update.
+		if c.Container.Running {
+			hr := update.RunHook(ctx, e.rt, c.Container.ID, update.HookPreSnapshot,
+				policy.Hooks.PreSnapshot, update.DefaultHookTimeout)
+			if hr != nil && hr.Err != nil {
+				release()
+				errs = append(errs, fmt.Errorf("%s: scheduled backup skipped: %w", c.Container.Name, hr.Err))
+				continue
+			}
+			if hr != nil {
+				e.log.Info("pre-snapshot hook ran",
+					"container", c.Container.Name, "duration", hr.Duration.Round(time.Millisecond))
+			}
+		}
+
 		// A scheduled backup defaults to reading hot. Creating downtime on a
 		// timer is not a decision to make on the operator's behalf; stopping
 		// first is available, but has to be asked for.

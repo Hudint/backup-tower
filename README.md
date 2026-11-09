@@ -234,7 +234,7 @@ services:
 | `tower.rollback` | `false` | Undo automatically when the health check fails |
 | `tower.strategy` | `auto` | `auto`, `compose` or `recreate` |
 | `tower.hook.pre-update` | — | Command run in the container before the update |
-| `tower.hook.pre-snapshot` | — | Command run before the snapshot — a `pg_dump`, say |
+| `tower.hook.pre-snapshot` | — | Command run before the snapshot — a `pg_dump`, say. Runs before update and scheduled snapshots alike |
 | `tower.hook.post-update` | — | Command run once the replacement is healthy |
 
 Only the `tower.*` namespace is read; other tools' labels are ignored on purpose.
@@ -391,6 +391,11 @@ labels:
 Scheduled backups read **hot** by default — creating downtime on a timer is not a
 decision the tool should make for you. Add `tower.snapshot.stop: "always"` if you
 want a consistent copy and can accept the pause.
+
+A `tower.hook.pre-snapshot` runs first here too, so the nightly backup carries a
+fresh dump rather than the one from the last update. If the hook fails, that
+night's backup is skipped and the failure is logged — a backup with a stale dump
+inside would look complete and not be.
 
 An invalid cron expression is reported by `plan` as a problem. A schedule that
 never runs because of a typo is otherwise indistinguishable from one that was

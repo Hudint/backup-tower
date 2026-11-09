@@ -23,6 +23,9 @@ const (
 	HookPostUpdate HookPhase = "post-update"
 )
 
+// DefaultHookTimeout bounds a hook when nothing more specific was configured.
+const DefaultHookTimeout = 5 * time.Minute
+
 // HookResult records what a hook did.
 type HookResult struct {
 	Phase    HookPhase
@@ -33,12 +36,13 @@ type HookResult struct {
 	Err      error
 }
 
-// runHook executes a command inside a container.
+// RunHook executes a command inside a container. It returns nil when there is no
+// command to run.
 //
 // Pre-hooks are allowed to veto: a dump that failed means the snapshot would be
 // taken without it, and continuing regardless would produce a backup that looks
 // complete and is not.
-func runHook(ctx context.Context, rt *runtime.Client, containerID string, phase HookPhase, command string, timeout time.Duration) *HookResult {
+func RunHook(ctx context.Context, rt *runtime.Client, containerID string, phase HookPhase, command string, timeout time.Duration) *HookResult {
 	if strings.TrimSpace(command) == "" {
 		return nil
 	}

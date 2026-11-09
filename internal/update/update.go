@@ -182,7 +182,7 @@ func (u *Updater) Update(ctx context.Context, cand *discover.Candidate, opts Opt
 		{HookPreSnapshot, policy.Hooks.PreSnapshot},
 	} {
 		if cand.Container.Running {
-			if hr := runHook(ctx, u.rt, cand.Container.ID, h.phase, h.command, u.hookTimeoutOr(opts)); hr != nil {
+			if hr := RunHook(ctx, u.rt, cand.Container.ID, h.phase, h.command, u.hookTimeoutOr(opts)); hr != nil {
 				res.Hooks = append(res.Hooks, hr)
 				if hr.Err != nil {
 					// A failed pre-hook aborts before the container is touched.
@@ -249,7 +249,7 @@ func (u *Updater) Update(ctx context.Context, cand *discover.Candidate, opts Opt
 		return res
 	}
 
-	if hr := runHook(ctx, u.rt, newID, HookPostUpdate, policy.Hooks.PostUpdate, u.hookTimeoutOr(opts)); hr != nil {
+	if hr := RunHook(ctx, u.rt, newID, HookPostUpdate, policy.Hooks.PostUpdate, u.hookTimeoutOr(opts)); hr != nil {
 		res.Hooks = append(res.Hooks, hr)
 		if hr.Err != nil {
 			// The update itself worked; a failed post-hook is worth reporting
@@ -385,7 +385,7 @@ func (u *Updater) hookTimeoutOr(opts Options) time.Duration {
 	if u.hookTimeout > 0 {
 		return u.hookTimeout
 	}
-	return 5 * time.Minute
+	return DefaultHookTimeout
 }
 
 // Describe renders a result as one line.

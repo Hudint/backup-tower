@@ -28,7 +28,8 @@ const (
 	StrategyRecreate Strategy = "recreate"
 )
 
-// Hooks are commands executed inside the container around an update.
+// Hooks are commands executed inside the container around an update. The
+// pre-snapshot hook also runs before a scheduled backup.
 type Hooks struct {
 	PreSnapshot string `yaml:"pre_snapshot,omitempty"`
 	PreUpdate   string `yaml:"pre_update,omitempty"`
